@@ -38,6 +38,6 @@
     "momentum": 0.9,
     "weight_decay": 0.0,
     "best_target": "auc",
-    "save_top_k": 3,
+    "save_top_k": 1,
     "save_index": [0,1,2,3,4]
 }
