@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch.nn.functional as F
 
 class ResNeSt(nn.Module):
     def __init__(self, pre_model, cfg):
