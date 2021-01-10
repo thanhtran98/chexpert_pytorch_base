@@ -20,8 +20,6 @@ class ResNeSt(nn.Module):
     def _init_classifier(self):
         for index, num_class in enumerate(self.cfg.num_classes):
             setattr(self,"fc_"+str(index),
-                    # nn.Conv2d(self.num_features,num_class,kernel_size=1,
-                    #           stride=1,padding=0,bias=True)
                     nn.Linear(in_features=self.num_features,
                               out_features=num_class, bias=True)
                     )
@@ -50,26 +48,15 @@ class ResNeSt(nn.Module):
                 feat_map = self.attention_map(feat_map)
 
             classifier = getattr(self, "fc_" + str(index))
-            # (N, 1, H, W)
-            # logit_map = None
-            # if not (self.cfg.global_pool == 'AVG_MAX' or
-            #         self.cfg.global_pool == 'AVG_MAX_LSE'):
-            #     logit_map = classifier(feat_map)
-            #     logit_maps.append(logit_map.squeeze())
-            # (N, C, 1, 1)
-            # feat = self.global_pool(feat_map, logit_map)
+            
             feat = self.avgpool(feat_map)
 
-            # if self.cfg.fc_bn:
-            #     bn = getattr(self, "bn_" + str(index))
-            #     feat = bn(feat)
             feat = F.dropout(feat, p=self.cfg.fc_drop, training=self.training)
+            
             # (N, num_class, 1, 1)
-
             logit = classifier(feat)
 
             # (N, num_class)
-            logit = logit
             logits.append(logit)
 
         return logits
@@ -93,10 +80,10 @@ class Efficient(nn.Module):
     def _init_classifier(self):
         for index, num_class in enumerate(self.cfg.num_classes):
             setattr(self,"fc_"+str(index),
-                    # nn.Conv2d(self.num_features,num_class,kernel_size=1,
-                    #           stride=1,padding=0,bias=True)
-                    nn.Linear(in_features=self.num_features,
-                              out_features=num_class, bias=True)
+                    nn.Conv2d(self.num_features,num_class,kernel_size=1,
+                              stride=1,padding=0,bias=True)
+                    # nn.Linear(in_features=self.num_features,
+                    #           out_features=num_class, bias=True)
                     )
 
             classifier = getattr(self, "fc_" + str(index))
@@ -121,28 +108,18 @@ class Efficient(nn.Module):
                 feat_map = self.attention_map(feat_map)
 
             classifier = getattr(self, "fc_" + str(index))
-            # (N, 1, H, W)
-            # logit_map = None
-            # if not (self.cfg.global_pool == 'AVG_MAX' or
-            #         self.cfg.global_pool == 'AVG_MAX_LSE'):
-            #     logit_map = classifier(feat_map)
-            #     logit_maps.append(logit_map.squeeze())
+
             # (N, C, 1, 1)
-            # feat = self.global_pool(feat_map, logit_map)
             feat = self._avg_pooling(feat_map)
             feat = self._dropout(feat)
 
-            # if self.cfg.fc_bn:
-            #     bn = getattr(self, "bn_" + str(index))
-            #     feat = bn(feat)
-            # feat = F.dropout(feat, p=self.cfg.fc_drop, training=self.training)
             # (N, num_class, 1, 1)
-            feat = feat.squeeze(-1).squeeze(-1)
+            # feat = feat.squeeze(-1).squeeze(-1)
             logit = classifier(feat)
-            logit = self._swish(logit)
+            # logit = self._swish(logit)
 
             # (N, num_class)
-            logit = logit
+            logit = logit.squeeze(-1).squeeze(-1)
             logits.append(logit)
 
         return logits

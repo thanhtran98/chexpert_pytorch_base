@@ -24,5 +24,6 @@ model = Efficient(pre_model, cfg)
 
 dummy_input = torch.randn(3, 3, 512, 512)
 output = model(dummy_input)
+print(output[0].shape)
 
 summary(model)
