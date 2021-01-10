@@ -32,7 +32,7 @@ def get_loss(output, target, index, device, cfg):
         target = target[:, index].view(-1)
         pos_weight = torch.from_numpy(
             np.array(cfg.pos_weight,
-                     dtype=np.float32)).to(device).type_as(target)
+                    dtype=np.float32)).to(device).type_as(target)
         if cfg.batch_weight:
             if target.sum() == 0:
                 loss = torch.tensor(0., requires_grad=True).to(device)

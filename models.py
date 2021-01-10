@@ -52,7 +52,7 @@ class ResNeSt(nn.Module):
             feat = self.avgpool(feat_map)
 
             feat = F.dropout(feat, p=self.cfg.fc_drop, training=self.training)
-            
+
             # (N, num_class, 1, 1)
             logit = classifier(feat)
 
@@ -123,3 +123,31 @@ class Efficient(nn.Module):
             logits.append(logit)
 
         return logits
+
+class ResNeSt_parallel(nn.Module):
+    def __init__(self, pre_model, num_classes):
+        super(ResNeSt_parallel, self).__init__()
+        self.conv1 = pre_model.conv1
+        self.bn1 = pre_model.bn1
+        self.relu = pre_model.relu
+        self.maxpool = pre_model.maxpool
+        self.layer1 = pre_model.layer1
+        self.layer2 = pre_model.layer2
+        self.layer3 = pre_model.layer3
+        self.layer4 = pre_model.layer4
+        self.avgpool = pre_model.avgpool
+        self.num_features = pre_model.fc.in_features
+        self.fc = nn.Sequential(nn.Linear(in_features=self.num_features,out_features=num_classes, bias=True), nn.Sigmoid())
+    
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = self.fc(x)
+        return x
