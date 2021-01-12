@@ -73,7 +73,6 @@ class Efficient(nn.Module):
         self._bn1 = pre_model._bn1
         self._avg_pooling = pre_model._avg_pooling
         self._dropout = pre_model._dropout
-        self._swish = pre_model._swish
         self.num_features = pre_model._fc.in_features
         self._init_classifier()
 
@@ -137,7 +136,7 @@ class ResNeSt_parallel(nn.Module):
         self.layer4 = pre_model.layer4
         self.avgpool = pre_model.avgpool
         self.num_features = pre_model.fc.in_features
-        self.fc = nn.Sequential(nn.Linear(in_features=self.num_features,out_features=num_classes, bias=True), nn.Sigmoid())
+        self.fc = nn.Linear(in_features=self.num_features,out_features=num_classes, bias=True)
     
     def forward(self, x):
         x = self.conv1(x)
@@ -150,4 +149,30 @@ class ResNeSt_parallel(nn.Module):
         x = self.layer4(x)
         x = self.avgpool(x)
         x = self.fc(x)
+        return x
+
+class Efficient_parallel(nn.Module):
+    def __init__(self, pre_model, num_classes):
+        super(Efficient_parallel, self).__init__()
+        self._conv_stem = pre_model._conv_stem
+        self._bn0 = pre_model._bn0
+        self._blocks = pre_model._blocks
+        self._conv_head = pre_model._conv_head
+        self._bn1 = pre_model._bn1
+        self._avg_pooling = pre_model._avg_pooling
+        self._dropout = pre_model._dropout
+        self.num_features = pre_model._fc.in_features
+        self._fc = nn.Linear(in_features=self.num_features,out_features=num_classes, bias=True)
+    
+    def forward(self, x):
+        x = self._conv_stem(x)
+        x = self._bn0(x)
+        for block in self._blocks:
+          x = block(x)
+        x = self._conv_head(x)
+        x = self._bn1(x)
+        x = self._avg_pooling(x)
+        x = self._dropout(x)
+        x = x.squeeze(dim=-1).squeeze(dim=-1)
+        x = self._fc(x)
         return x

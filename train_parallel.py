@@ -6,18 +6,31 @@ from sklearn import metrics
 import time, os, cv2, shutil
 from data.utils import transform
 from tensorboardX import SummaryWriter
-from models import ResNeSt_parallel
+from models import ResNeSt_parallel, Efficient_parallel
 from resnest.torch import resnest50, resnest101, resnest200, resnest269
+from efficientnet_pytorch import EfficientNet
 
-def build_parallel_model(model_name, pretrained=False):
-
-    pre_model = resnest50(pretrained=pretrained)
-
-    # pre_model = EfficientNet.from_pretrained('efficientnet-b4')
-    for param in pre_model.parameters():
-        param.requires_grad = True
-
-    model = ResNeSt_parallel(pre_model, 5)
+def build_parallel_model(model_name, id, pretrained=False):
+    if model_name == 'resnest':
+        if id == '50':
+            pre_name = resnest50
+        elif id == '101':
+            pre_name = resnest101
+        elif id == '200':
+            pre_name = resnest200
+        else:
+            pre_name = resnest269
+        pre_model = pre_name(pretrained=pretrained)
+        # pre_model = EfficientNet.from_pretrained('efficientnet-b4')
+        for param in pre_model.parameters():
+            param.requires_grad = True
+        model = ResNeSt_parallel(pre_model, 5)
+    else:
+        pre_name = 'efficientnet-'+id
+        pre_model = EfficientNet.from_pretrained(pre_name)
+        for param in pre_model.parameters():
+            param.requires_grad = True
+        model = Efficient_parallel(pre_model, 5)
     return model
 
 def get_str(metrics, mode, s):
