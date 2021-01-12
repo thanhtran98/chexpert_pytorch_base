@@ -6,6 +6,8 @@ from efficientnet_pytorch import EfficientNet
 from torchvision.models.densenet import densenet121
 from resnest.torch import resnest50, resnest101, resnest200, resnest269, resnest50_fast_4s2x40d
 from torchsummary import summary
+import torch.nn as nn
+from metrics import AUC
 from models import Efficient, ResNeSt, ResNeSt_parallel, Efficient_parallel
 from easydict import EasyDict as edict
 
@@ -27,8 +29,11 @@ for param in pre_model.parameters():
 model = Efficient_parallel(pre_model, 5)
 
 dummy_input = torch.randn(3, 3, 512, 512)
-output = model(dummy_input)
-print(output.shape)
-
-summary(model)
+output = nn.Sigmoid()(model(dummy_input))
+print(output)
+dummy_output = (nn.Sigmoid()(torch.randn(3, 5)) > 0.5)*1.0
+print(dummy_output)
+auc = AUC()
+print(auc(output, dummy_output))
+# summary(model)
 # print(pre_model)

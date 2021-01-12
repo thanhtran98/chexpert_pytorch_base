@@ -146,7 +146,7 @@ class ChexPert_model():
                         if key == 'loss':
                             running_metrics[key] += running_loss
                         else:
-                            running_metrics[key] += self.metrics[key](preds, labels).cpu().numpy()*batch_weights[i]
+                            running_metrics[key] += self.metrics[key](nn.Sigmoid()(preds), labels).cpu().numpy()*batch_weights[i]
                     if mode == 'train':
                         self.optimizer.zero_grad()
                         if mix_precision:
