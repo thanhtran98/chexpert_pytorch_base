@@ -51,10 +51,11 @@ class ChexPert_model():
     'Atelectasis',
     'Pleural Effusion'
     ]
-    def __init__(self, cfg, loss_func, optimizer, model_name='resnest', lr=3e-4, metrics=None, pretrained=True):
+    def __init__(self, cfg, loss_func, optimizer, model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
         self.model_name = model_name
+        self.id = id
         self.cfg = cfg
-        self.model = build_parallel_model(self.model_name, pretrained=pretrained)
+        self.model = build_parallel_model(self.model_name, id = self.id, pretrained=pretrained)
         self.loss_func = loss_func
         if metrics is not None:
             self.metrics = metrics
@@ -166,7 +167,7 @@ class ChexPert_model():
                                 print('new checkpoint saved!')
                             if writer is not None:
                                 for key in list(self.metrics.keys()):
-                                    writer.add_scalars(key, {mode: running_metrics[key].mean()}, epoch)
+                                    writer.add_scalars(key, {mode: running_metrics[key].mean()}, i+1)
                             running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
                             end = time.time()
                             s = s[:-1] + " ({:.1f}s)".format(end-start)
