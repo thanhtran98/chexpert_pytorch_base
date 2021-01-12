@@ -70,4 +70,4 @@ class ACC(nn.Module):
     def forward(self, pred, target):
         pred_thresh = (pred > self.thresh)*1.0
         t = torch.sum(pred_thresh==target, dim=0)
-        return t/pred.size()[0]
+        return t/(float(pred.shape[0]))

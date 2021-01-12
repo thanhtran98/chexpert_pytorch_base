@@ -27,7 +27,7 @@ def get_str(metrics, mode, s):
         else:
             metric_str = ' '.join(map(lambda x: '{:.5f}'.format(x), metrics[key]))
             s += "{}_{} {} - ".format(mode, key, metric_str)
-    s = s[-2] + '\n'
+    s = s[:-2] + '\n'
     return s
 
 class ChexPert_model():
@@ -82,7 +82,7 @@ class ChexPert_model():
 
         return self.predict(image)
 
-    def train(self, loader_dict, epochs=120, iter_log=100, use_lr_sch=False, ckp_dir='./checkpoint', writer=None, eval_metric='loss'):
+    def train(self, loader_dict, epochs=120, iter_log=100, use_lr_sch=False, ckp_dir='./checkpoint', writer=None, eval_metric='loss', mix_precision=False):
         if 'train' not in list(loader_dict.keys()):
             raise Exception("missing \'train\' keys in loader_dict!!!")
         if use_lr_sch:
@@ -96,26 +96,37 @@ class ChexPert_model():
         os.mkdir(ckp_dir)
         modes = list(loader_dict.keys())
         history = dict.fromkeys(modes, {})
+        if mix_precision:
+            print('Train with mix precision!')
+            scaler = torch.cuda.amp.GradScaler()
         for mode in modes:
             history[mode] = dict.fromkeys(self.metrics.keys(), [])
         for epoch in range(epochs):
             start = time.time()
             for mode in modes:
                 running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
-                ova_len = loader_dict[mode].dataset.n_data
+                ova_len = loader_dict[mode].dataset._num_image
                 n_iter = len(loader_dict[mode])
                 # n_log = n_iter//iter_log + 1
                 if mode == 'train':
+                    torch.set_grad_enabled(True)
                     self.model.train()
                     batch_weights = (1/iter_log)*np.ones(n_iter)
                     batch_weights[-(n_iter%iter_log):] = 1/(n_iter%iter_log)
                 else:
+                    torch.set_grad_enabled(False)
                     self.model.eval()
                     batch_weights = (1/n_iter)*np.ones(n_iter)
                 for i, data in enumerate(loader_dict[mode]):
                     imgs, labels = data[0].to(self.device), data[1].to(self.device)
-                    preds = self.model(imgs)
-                    loss = self.metrics['loss'](preds, labels)
+                    if mix_precision:
+                        with torch.cuda.amp.autocast():
+                            # loss = model(data)
+                            preds = self.model(imgs)
+                            loss = self.metrics['loss'](preds, labels)
+                    else:
+                        preds = self.model(imgs)
+                        loss = self.metrics['loss'](preds, labels)
                     running_loss = loss.item()*batch_weights[i]
                     for key in list(self.metrics.keys()):
                         if key == 'loss':
@@ -124,15 +135,20 @@ class ChexPert_model():
                             running_metrics[key] += self.metrics[key](preds, labels).cpu().numpy()*batch_weights[i]
                     if mode == 'train':
                         self.optimizer.zero_grad()
-                        loss.backward()
-                        self.optimizer.step()
+                        if mix_precision:
+                            scaler.scale(loss).backward()
+                            scaler.step(self.optimizer)
+                            scaler.update()
+                        else:
+                            loss.backward()
+                            self.optimizer.step()
                         if (i+1)%iter_log == 0:
                             s="Epoch [{}/{}] Iter [{}/{}]:\n".format(epoch+1, epochs, i+1, n_iter)
                             s = get_str(running_metrics, mode, s)
-                            running_metrics_test = self.test(loader_dict[modes[-1]])
+                            running_metrics_test = self.test(loader_dict[modes[-1]], mix_precision)
                             s = get_str(running_metrics_test, modes[-1], s)
-                            if running_metrics_test[eval_metric] > best_metric:
-                                best_metric = running_metrics_test[eval_metric]
+                            if running_metrics_test[eval_metric].mean() > best_metric:
+                                best_metric = running_metrics_test[eval_metric].mean()
                                 torch.save(self.model.state_dict(), os.path.join(ckp_dir,'epoch'+str(epoch+1)+'.pt'))
                                 print('new checkpoint saved!')
                             if writer is not None:
@@ -154,15 +170,20 @@ class ChexPert_model():
                 print('current lr: {:.4f}'.format(lr_sch.get_lr()[0]))
         return history
 
-    def test(self, loader):
+    def test(self, loader, mix_precision=False):
         torch.set_grad_enabled(False)
         self.model.eval()
         running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
-        ova_len = loader.dataset.n_data
+        ova_len = loader.dataset._num_image
         for i, data in enumerate(loader):
             imgs, labels = data[0].to(self.device), data[1].to(self.device)
-            preds = self.model(imgs)
-            loss = self.metrics['loss'](preds, labels)
+            if mix_precision:
+                with torch.cuda.amp.autocast():
+                    preds = self.model(imgs)
+                    loss = self.metrics['loss'](preds, labels)
+            else:
+                preds = self.model(imgs)
+                loss = self.metrics['loss'](preds, labels)
             iter_len = imgs.size()[0]
             running_loss = loss.item()*iter_len/ova_len
             for key in list(self.metrics.keys()):
@@ -170,14 +191,15 @@ class ChexPert_model():
                     running_metrics[key] += running_loss
                 else:
                     running_metrics[key] += self.metrics[key](preds, labels).cpu().numpy()*iter_len/ova_len
-        
+        torch.set_grad_enabled(True)
+        self.model.train()
         return running_metrics
 
     def evaluate(self, loader):
         torch.set_grad_enabled(False)
         self.model.eval()
         with torch.no_grad() as tng:
-            ova_len = loader.dataset.n_data
+            ova_len = loader.dataset._num_image
             running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
             for i, data in enumerate(loader):
                 imgs, targets = data[0].to(self.device), data[1].to(self.device)
