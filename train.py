@@ -195,6 +195,9 @@ class ChexPert_model():
                             s = get_str(running_metrics_test, modes[-1], s)
                             s = s[:-1] + " - mean_"+eval_metric+" {:.3f}".format(running_metrics_test[eval_metric].mean())
                             self.save_ckp(os.path.join(ckp_dir,'latest.ckpt'), epoch, i)
+                            if writer is not None:
+                                for key in list(running_metrics.keys()):
+                                    writer.add_scalars(key, {mode: running_metrics[key].mean()}, (epoch*n_iter)+(i+1))
                             running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
                             running_metrics.pop('auc', None)
                             end = time.time()
@@ -204,9 +207,6 @@ class ChexPert_model():
                                 best_metric = running_metrics_test[eval_metric].mean()
                                 shutil.copyfile(os.path.join(ckp_dir,'latest.ckpt'), os.path.join(ckp_dir,'epoch'+str(epoch+1)+'_iter'+str(i+1)+'.ckpt'))
                                 print('new checkpoint saved!')
-                            if writer is not None:
-                                for key in list(running_metrics.keys()):
-                                    writer.add_scalars(key, {mode: running_metrics[key].mean()}, (epoch*ova_len)+(i+1))
                             
                             start = time.time()
                 if mode == 'train':
