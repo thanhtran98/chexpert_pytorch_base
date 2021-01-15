@@ -1,290 +1,273 @@
+from os.path import split
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import numpy as np
 from sklearn import metrics
-import time, os
+import time, os, cv2, shutil
+from data.utils import transform
 from tensorboardX import SummaryWriter
+from models import ResNeSt_parallel, Efficient_parallel, Efficient, ResNeSt
+from resnest.torch import resnest50, resnest101, resnest200, resnest269
+from efficientnet_pytorch import EfficientNet
+import tqdm
 
-def lr_schedule(lr, lr_factor, epoch_now, lr_epochs):
-    """
-    Learning rate schedule with respect to epoch
-    lr: float, initial learning rate
-    lr_factor: float, decreasing factor every epoch_lr
-    epoch_now: int, the current epoch
-    lr_epochs: list of int, decreasing every epoch in lr_epochs
-    return: lr, float, scheduled learning rate.
-    """
-    count = 0
-    for epoch in lr_epochs:
-        if epoch_now >= epoch:
-            count += 1
-            continue
-
-        break
-
-    return lr * np.power(lr_factor, count)
-
-def get_loss(output, target, index, device, cfg):
-    if cfg.criterion == 'BCE':
-        for num_class in cfg.num_classes:
-            assert num_class == 1
-        target = target[:, index].view(-1)
-        pos_weight = torch.from_numpy(
-            np.array(cfg.pos_weight,
-                    dtype=np.float32)).to(device).type_as(target)
-        if cfg.batch_weight:
-            if target.sum() == 0:
-                loss = torch.tensor(0., requires_grad=True).to(device)
-            else:
-                weight = (target.size()[0] - target.sum()) / target.sum()
-                loss = F.binary_cross_entropy_with_logits(
-                    output[index].view(-1), target, pos_weight=weight)
+def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_output=False):
+    if model_name == 'resnest':
+        if id == '50':
+            pre_name = resnest50
+        elif id == '101':
+            pre_name = resnest101
+        elif id == '200':
+            pre_name = resnest200
         else:
-            loss = F.binary_cross_entropy_with_logits(
-                output[index].view(-1), target, pos_weight=pos_weight[index])
-
-        label = torch.sigmoid(output[index].view(-1)).ge(0.5).float()
-        acc = (target == label).float().sum() / len(label)
+            pre_name = resnest269
+        pre_model = pre_name(pretrained=pretrained)
+        # pre_model = EfficientNet.from_pretrained('efficientnet-b4')
+        for param in pre_model.parameters():
+            param.requires_grad = True
+        if split_output:
+            model = ResNeSt(pre_model, cfg)
+        else:
+            model = ResNeSt_parallel(pre_model, 5)
     else:
-        raise Exception('Unknown criterion : {}'.format(cfg.criterion))
+        pre_name = 'efficientnet-'+id
+        pre_model = EfficientNet.from_pretrained(pre_name)
+        for param in pre_model.parameters():
+            param.requires_grad = True
+        if split_output:
+            model = Efficient(pre_model, cfg)
+        else:
+            model = Efficient_parallel(pre_model, 5)
+    return model
 
-    return (loss, acc)
+def get_str(metrics, mode, s):
+    for key in list(metrics.keys()):
+        if key == 'loss':
+            s += "{}_{} {:.3f} - ".format(mode, key, metrics[key])
+        else:
+            metric_str = ' '.join(map(lambda x: '{:.5f}'.format(x), metrics[key]))
+            s += "{}_{} {} - ".format(mode, key, metric_str)
+    s = s[:-2] + '\n'
+    return s
 
-def test_epoch(summary, cfg, device, model, dataloader):
-    torch.set_grad_enabled(False)
-    model.eval()
-    steps = len(dataloader)
-    dataiter = iter(dataloader)
-    num_tasks = len(cfg.num_classes)
+class ChexPert_model():
+    disease_classes = [
+    'Cardiomegaly',
+    'Edema',
+    'Consolidation',
+    'Atelectasis',
+    'Pleural Effusion'
+    ]
+    def __init__(self, cfg, optimizer, split_output=False, loss_func=None, model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
+        self.model_name = model_name
+        self.id = id
+        self.cfg = cfg
+        self.split_output = split_output
+        self.model = build_parallel_model(self.model_name, id = self.id, cfg=self.cfg, pretrained=pretrained, split_output=split_output)
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if self.split_output:
+            self.loss_func = OA_loss(self.device, self.cfg)
+        else:
+            self.loss_func = loss_func
+        if metrics is not None:
+            self.metrics = metrics
+            self.metrics['loss'] = self.loss_func
+        else:
+            self.metrics = {'loss': self.loss_func}
+        self.lr = lr
+        self.optimizer = optimizer(self.model.parameters(),self.lr)
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+    
+    def load_ckp(self, ckp_path):
+        ckp = torch.load(ckp_path, map_location=self.device)
+        self.model.load_state_dict(ckp['state_dict'])
 
-    loss_sum = np.zeros(num_tasks)
-    acc_sum = np.zeros(num_tasks)
-
-    predlist = list(x for x in range(len(cfg.num_classes)))
-    true_list = list(x for x in range(len(cfg.num_classes)))
-    for step in range(steps):
-        image, target = next(dataiter)
-        image = image.to(device)
-        target = target.to(device)
-        output = model(image)
-        # different number of tasks
-        for t in range(len(cfg.num_classes)):
-
-            loss_t, acc_t = get_loss(output, target, t, device, cfg)
-            # AUC
-            output_tensor = torch.sigmoid(
-                output[t].view(-1)).cpu().detach().numpy()
-            target_tensor = target[:, t].view(-1).cpu().detach().numpy()
-            if step == 0:
-                predlist[t] = output_tensor
-                true_list[t] = target_tensor
-            else:
-                predlist[t] = np.append(predlist[t], output_tensor)
-                true_list[t] = np.append(true_list[t], target_tensor)
-
-            loss_sum[t] += loss_t.item()
-            acc_sum[t] += acc_t.item()
-    summary['loss'] = loss_sum / steps
-    summary['acc'] = acc_sum / steps
-
-    return summary, predlist, true_list
-
-def train_epoch(summary, summary_dev, cfg, device, model, dataloader,
-                dataloader_dev, optimizer, save_path, best_dict, summary_writer):
-    torch.set_grad_enabled(True)
-    model.train()
-    steps = len(dataloader)
-    dataiter = iter(dataloader)
-    label_header = dataloader.dataset._label_header
-    dev_header = dataloader_dev.dataset._label_header
-    num_tasks = len(cfg.num_classes)
-
-    time_now = time.time()
-    loss_sum = np.zeros(num_tasks)
-    acc_sum = np.zeros(num_tasks)
-    for step in range(steps):
-        image, target = next(dataiter)
-        image = image.to(device)
-        target = target.to(device)
-        output = model(image)
-
-        # different number of tasks
-        loss = 0
-        for t in range(num_tasks):
-            loss_t, acc_t = get_loss(output, target, t, device, cfg)
-            loss += loss_t
-            loss_sum[t] += loss_t.item()
-            acc_sum[t] += acc_t.item()
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        summary['step'] += 1
-
-        if summary['step'] % cfg.log_every == 0:
-            time_spent = time.time() - time_now
-            time_now = time.time()
-
-            loss_sum /= cfg.log_every
-            acc_sum /= cfg.log_every
-            loss_str = ' '.join(map(lambda x: '{:.5f}'.format(x), loss_sum))
-            acc_str = ' '.join(map(lambda x: '{:.3f}'.format(x), acc_sum))
-
-            print(
-                'Train, Epoch : {}, Step : {}, Loss : {}, '
-                'Acc : {}, Run Time : {:.2f} sec'
-                .format(summary['epoch'] + 1, summary['step'], loss_str,
-                        acc_str, time_spent))
-
-            for t in range(num_tasks):
-                summary_writer.add_scalar(
-                    'train/loss_{}'.format(label_header[t]), loss_sum[t],
-                    summary['step'])
-                summary_writer.add_scalar(
-                    'train/acc_{}'.format(label_header[t]), acc_sum[t],
-                    summary['step'])
-
-            loss_sum = np.zeros(num_tasks)
-            acc_sum = np.zeros(num_tasks)
-
-        if summary['step'] % cfg.test_every == 0:
-            time_now = time.time()
-            summary_dev, predlist, true_list = test_epoch(
-                summary_dev, cfg, device, model, dataloader_dev)
-            time_spent = time.time() - time_now
-
-            auclist = []
-            for i in range(len(cfg.num_classes)):
-                y_pred = predlist[i]
-                y_true = true_list[i]
-                fpr, tpr, thresholds = metrics.roc_curve(
-                    y_true, y_pred, pos_label=1)
-                auc = metrics.auc(fpr, tpr)
-                auclist.append(auc)
-            summary_dev['auc'] = np.array(auclist)
-
-            loss_dev_str = ' '.join(map(lambda x: '{:.5f}'.format(x),
-                                        summary_dev['loss']))
-            acc_dev_str = ' '.join(map(lambda x: '{:.3f}'.format(x),
-                                       summary_dev['acc']))
-            auc_dev_str = ' '.join(map(lambda x: '{:.3f}'.format(x),
-                                       summary_dev['auc']))
-
-            print(
-                'Dev, Step : {}, Loss : {}, Acc : {}, Auc : {},'
-                'Mean auc: {:.3f} ''Run Time : {:.2f} sec' .format(
-                    summary['step'],
-                    loss_dev_str,
-                    acc_dev_str,
-                    auc_dev_str,
-                    summary_dev['auc'].mean(),
-                    time_spent))
-
-            for t in range(len(cfg.num_classes)):
-                summary_writer.add_scalar(
-                    'dev/loss_{}'.format(dev_header[t]),
-                    summary_dev['loss'][t], summary['step'])
-                summary_writer.add_scalar(
-                    'dev/acc_{}'.format(dev_header[t]), summary_dev['acc'][t],
-                    summary['step'])
-                summary_writer.add_scalar(
-                    'dev/auc_{}'.format(dev_header[t]), summary_dev['auc'][t],
-                    summary['step'])
-
-            save_best = False
-            mean_acc = summary_dev['acc'][cfg.save_index].mean()
-            if mean_acc >= best_dict['acc_dev_best']:
-                best_dict['acc_dev_best'] = mean_acc
-                if cfg.best_target == 'acc':
-                    save_best = True
-
-            mean_auc = summary_dev['auc'][cfg.save_index].mean()
-            if mean_auc >= best_dict['auc_dev_best']:
-                best_dict['auc_dev_best'] = mean_auc
-                if cfg.best_target == 'auc':
-                    save_best = True
-
-            mean_loss = summary_dev['loss'][cfg.save_index].mean()
-            if mean_loss <= best_dict['loss_dev_best']:
-                best_dict['loss_dev_best'] = mean_loss
-                if cfg.best_target == 'loss':
-                    save_best = True
-            
+    def load_resume_ckp(self, ckp_path):
+        ckp = torch.load(ckp_path, map_location=self.device)
+        self.model.load_state_dict(ckp['state_dict'])
+        return ckp['epoch'], ckp['iter']
+    
+    def save_ckp(self, ckp_path, epoch, i):
+        if os.path.exists(os.path.dirname(ckp_path)):
             torch.save(
-                    {'epoch': summary['epoch'],
-                     'step': summary['step'],
-                     'acc_dev_best': mean_acc,
-                     'auc_dev_best': mean_auc,
-                     'loss_dev_best': mean_loss,
-                     'state_dict': model.state_dict()},
-                    os.path.join(save_path, 'latest.ckpt')
-                )
+                        {'epoch': epoch+1,
+                        'iter': i+1,
+                        'state_dict':self. model.state_dict()},
+                        ckp_path
+                        )
+        else:
+            print("Save path not exist!!!")
+    
+    def predict(self, image):
 
-            if save_best:
-                torch.save(
-                    {'epoch': summary['epoch'],
-                     'step': summary['step'],
-                     'acc_dev_best': best_dict['acc_dev_best'],
-                     'auc_dev_best': best_dict['auc_dev_best'],
-                     'loss_dev_best': best_dict['loss_dev_best'],
-                     'state_dict': model.state_dict()},
-                    os.path.join(save_path, 'best{}.ckpt'.format(
-                        best_dict['best_idx']))
-                )
-                best_dict['best_idx'] += 1
-                if best_dict['best_idx'] > cfg.save_top_k:
-                    best_dict['best_idx'] = 1
-                print(
-                    'Best, Step : {}, Loss : {}, Acc : {},Auc :{},'
-                    'Best Auc : {:.3f}' .format(
-                        summary['step'],
-                        loss_dev_str,
-                        acc_dev_str,
-                        auc_dev_str,
-                        best_dict['auc_dev_best']))
-            
-        model.train()
+        torch.set_grad_enabled(False)
+        self.model.eval()
+        with torch.no_grad() as tng:
+            preds = self.model(image)
+            preds = preds.cpu().numpy()
+
+        return preds
+
+    def predict_from_file(self, image_file):
+
+        image_gray = cv2.imread(image_file, 0)  
+        image = transform(image_gray, self.cfg)
+        image = torch.from_numpy(image)
+        image = image.unsqueeze(0)
+
+        return self.predict(image)
+
+    def train(self, loader_dict, epochs=120, iter_log=100, use_lr_sch=False, resume=False, ckp_dir='./experiment/checkpoint', writer=None, eval_metric='loss', mix_precision=False):
+        if 'train' not in list(loader_dict.keys()):
+            raise Exception("missing \'train\' keys in loader_dict!!!")
+        if use_lr_sch:
+            lr_sch = torch.optim.lr_scheduler.StepLR(self.optimizer, int(epochs*2/3), self.lr/3)
+        else:
+            lr_sch = None
+        
+        best_metric = 0.0
+        if os.path.exists(ckp_dir) != True:
+            os.mkdir(ckp_dir)
+        if resume:
+            epoch_resume, iter_resume = self.load_resume_ckp(os.path.join(ckp_dir,'latest.ckpt'))
+        else:
+            epoch_resume = 0
+            iter_resume = 0
+        modes = list(loader_dict.keys())
+        history = dict.fromkeys(modes, {})
+        if mix_precision:
+            print('Train with mix precision!')
+            scaler = torch.cuda.amp.GradScaler()
+        for mode in modes:
+            history[mode] = dict.fromkeys(self.metrics.keys(), [])
+        for epoch in range(epoch_resume-1, epochs):
+            start = time.time()
+            for mode in modes:
+                running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
+                if mode == 'train':
+                    running_metrics.pop('auc', None)
+                ova_len = loader_dict[mode].dataset._num_image
+                n_iter = len(loader_dict[mode])
+                # n_log = n_iter//iter_log + 1
+                if mode == 'train':
+                    torch.set_grad_enabled(True)
+                    self.model.train()
+                    batch_weights = (1/iter_log)*np.ones(n_iter)
+                    if n_iter%iter_log:
+                        batch_weights[-(n_iter%iter_log):] = 1/(n_iter%iter_log)
+                else:
+                    torch.set_grad_enabled(False)
+                    self.model.eval()
+                    batch_weights = (1/n_iter)*np.ones(n_iter)
+                for i, data in tqdm.tqdm(enumerate(loader_dict[mode])):
+                    imgs, labels = data[0].to(self.device), data[1].to(self.device)
+                    if mix_precision:
+                        with torch.cuda.amp.autocast():
+                            preds = self.model(imgs)
+                            loss = self.metrics['loss'](preds, labels)
+                    else:
+                        preds = self.model(imgs)
+                        loss = self.metrics['loss'](preds, labels)
+                    if self.split_output:
+                        preds = torch.cat([aa for aa in preds], dim=-1)
+                    preds = nn.Sigmoid()(preds)
+                    running_loss = loss.item()*batch_weights[i]
+                    for key in list(running_metrics.keys()):
+                        if key == 'loss':
+                            running_metrics[key] += running_loss
+                        else:
+                            running_metrics[key] += self.metrics[key](preds, labels).cpu().numpy()*batch_weights[i]
+                    if mode == 'train':
+                        self.optimizer.zero_grad()
+                        if mix_precision:
+                            scaler.scale(loss).backward()
+                            scaler.step(self.optimizer)
+                            scaler.update()
+                        else:
+                            loss.backward()
+                            self.optimizer.step()
+                        if (i+1)%iter_log == 0:
+                            s="Epoch [{}/{}] Iter [{}/{}]:\n".format(epoch+1, epochs, i+1, n_iter)
+                            s = get_str(running_metrics, mode, s)
+                            running_metrics_test = self.test(loader_dict[modes[-1]], mix_precision)
+                            s = get_str(running_metrics_test, modes[-1], s)
+                            s = s[:-1] + " - mean_"+eval_metric+" {:.3f}".format(running_metrics_test[eval_metric].mean())
+                            self.save_ckp(os.path.join(ckp_dir,'latest.ckpt'), epoch, i)
+                            running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
+                            running_metrics.pop('auc', None)
+                            end = time.time()
+                            s = s[:-1] + " ({:.1f}s)".format(end-start)
+                            print(s)
+                            if running_metrics_test[eval_metric].mean() > best_metric:
+                                best_metric = running_metrics_test[eval_metric].mean()
+                                shutil.copyfile(os.path.join(ckp_dir,'latest.ckpt'), os.path.join(ckp_dir,'epoch'+str(epoch+1)+'_iter'+str(i+1)+'.ckpt'))
+                                print('new checkpoint saved!')
+                            if writer is not None:
+                                for key in list(running_metrics.keys()):
+                                    writer.add_scalars(key, {mode: running_metrics[key].mean()}, (epoch*ova_len)+(i+1))
+                            
+                            start = time.time()
+                if mode == 'train':
+                    s="Epoch [{}/{}] Iter [{}/{}]:\n".format(epoch+1, epochs, n_iter, n_iter)
+                s = get_str(running_metrics, mode, s)
+            end = time.time()
+            s = s + "({:.1f}s)".format(end-start)
+            print(s)
+            if lr_sch is not None:
+                lr_sch.step()
+                print('current lr: {:.4f}'.format(lr_sch.get_lr()[0]))
+        return history
+
+    def test(self, loader, mix_precision=False):
+        torch.set_grad_enabled(False)
+        self.model.eval()
+        running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
+        ova_len = loader.dataset._num_image
+        for i, data in enumerate(loader):
+            imgs, labels = data[0].to(self.device), data[1].to(self.device)
+            if mix_precision:
+                with torch.cuda.amp.autocast():
+                    preds = self.model(imgs)
+                    loss = self.metrics['loss'](preds, labels)
+            else:
+                preds = self.model(imgs)
+                loss = self.metrics['loss'](preds, labels)
+            if self.split_output:
+                preds = torch.cat([aa for aa in preds], dim=-1)
+            preds = nn.Sigmoid()(preds)
+            iter_len = imgs.size()[0]
+            if i == 0:
+                preds_stack = preds
+                labels_stack = labels
+                running_loss = loss.item()*iter_len/ova_len
+            else:
+                preds_stack = torch.cat((preds_stack, preds), 0)
+                labels_stack = torch.cat((labels_stack, labels), 0)
+                running_loss += loss.item()*iter_len/ova_len
+        for key in list(self.metrics.keys()):
+            if key == 'loss':
+                running_metrics[key] = running_loss
+            else:
+                running_metrics[key] = self.metrics[key](preds_stack, labels_stack).cpu().numpy()
         torch.set_grad_enabled(True)
-    summary['epoch'] += 1
+        self.model.train()
+        return running_metrics
 
-    return summary, best_dict
-
-def train(model, cfg, optimizer, train_loader, val_loader, save_path='./', resume=False, ckpt_path=None):
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    summary_train = {'epoch': 0, 'step': 0}
-    summary_dev = {'loss': float('inf'), 'acc': 0.0}
-    summary_writer = SummaryWriter(save_path)
-    epoch_start = 0
-    best_dict = {
-        "acc_dev_best": 0.0,
-        "auc_dev_best": 0.0,
-        "loss_dev_best": float('inf'),
-        "fused_dev_best": 0.0,
-        "best_idx": 1}
-
-    if resume:
-        if ckpt_path is None:
-            raise Exception("ckp_path is not defined for resume training!")
-        ckpt = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(ckpt['state_dict'])
-        summary_train = {'epoch': ckpt['epoch'], 'step': ckpt['step']}
-        best_dict['acc_dev_best'] = ckpt['acc_dev_best']
-        best_dict['loss_dev_best'] = ckpt['loss_dev_best']
-        best_dict['auc_dev_best'] = ckpt['auc_dev_best']
-        epoch_start = ckpt['epoch']
-
-    for epoch in range(epoch_start, cfg.epoch):
-        lr = lr_schedule(cfg.lr, cfg.lr_factor, summary_train['epoch'],
-                         cfg.lr_epochs)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-
-        summary_train, best_dict = train_epoch(
-            summary_train, summary_dev, cfg, device, model,
-            train_loader, val_loader, optimizer,
-            save_path, best_dict, summary_writer)
+    def evaluate(self, loader):
+        torch.set_grad_enabled(False)
+        self.model.eval()
+        with torch.no_grad() as tng:
+            ova_len = loader.dataset._num_image
+            running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
+            for i, data in enumerate(loader):
+                imgs, targets = data[0].to(self.device), data[1].to(self.device)
+                preds = self.model(imgs)
+                iter_len = imgs.size()[0]
+                for key in list(self.metrics.keys()):
+                    running_metrics[key] += self.metrics[key](preds, targets).item()*iter_len/ova_len
+        s=""
+        for key in list(self.metrics.keys()):
+            s += "{}: {:.3f} - ".format(key, running_metrics[key])
+        print(s[:-2])
