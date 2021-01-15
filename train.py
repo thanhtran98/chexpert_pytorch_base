@@ -7,7 +7,7 @@ from sklearn import metrics
 import time, os, cv2, shutil
 from data.utils import transform
 from tensorboardX import SummaryWriter
-from models import ResNeSt_parallel, Efficient_parallel, Efficient, ResNeSt
+from model.models import ResNeSt_parallel, Efficient_parallel, Efficient, ResNeSt
 from resnest.torch import resnest50, resnest101, resnest200, resnest269
 from efficientnet_pytorch import EfficientNet
 import tqdm
