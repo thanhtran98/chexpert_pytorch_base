@@ -49,6 +49,19 @@ def get_loss(output, target, index, device, cfg):
 
     return (loss, acc)
 
+class OA_loss(nn.Module):
+    def __init__(self, device, cfg):
+        super(OA_loss, self).__init__()
+        self.device=device
+        self.cfg=cfg
+    def forward(self, pred, target):
+        num_tasks = len(self.cfg.num_classes)
+        loss_sum = 0.0
+        for t in range(num_tasks):
+            loss_t = get_loss(pred, target, t, self.device, self.cfg)
+            loss_sum += loss_t*(1/num_tasks)
+        return loss_sum
+
 class F1(nn.Module):
     def __init__(self, thresh=0.5, eps=1e-5):
         super(F1, self).__init__()

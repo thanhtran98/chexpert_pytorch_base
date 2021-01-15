@@ -1,3 +1,4 @@
+from os.path import split
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -6,11 +7,12 @@ from sklearn import metrics
 import time, os, cv2, shutil
 from data.utils import transform
 from tensorboardX import SummaryWriter
-from models import ResNeSt_parallel, Efficient_parallel
+from models import ResNeSt_parallel, Efficient_parallel, Efficient, ResNeSt
 from resnest.torch import resnest50, resnest101, resnest200, resnest269
 from efficientnet_pytorch import EfficientNet
+import tqdm
 
-def build_parallel_model(model_name, id, pretrained=False):
+def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_output=False):
     if model_name == 'resnest':
         if id == '50':
             pre_name = resnest50
@@ -24,13 +26,19 @@ def build_parallel_model(model_name, id, pretrained=False):
         # pre_model = EfficientNet.from_pretrained('efficientnet-b4')
         for param in pre_model.parameters():
             param.requires_grad = True
-        model = ResNeSt_parallel(pre_model, 5)
+        if split_output:
+            model = ResNeSt(pre_model, cfg)
+        else:
+            model = ResNeSt_parallel(pre_model, 5)
     else:
         pre_name = 'efficientnet-'+id
         pre_model = EfficientNet.from_pretrained(pre_name)
         for param in pre_model.parameters():
             param.requires_grad = True
-        model = Efficient_parallel(pre_model, 5)
+        if split_output:
+            model = Efficient(pre_model, cfg)
+        else:
+            model = Efficient_parallel(pre_model, 5)
     return model
 
 def get_str(metrics, mode, s):
@@ -51,29 +59,44 @@ class ChexPert_model():
     'Atelectasis',
     'Pleural Effusion'
     ]
-    def __init__(self, cfg, loss_func, optimizer, model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
+    def __init__(self, cfg, optimizer, split_output=False, loss_func=None, model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
         self.model_name = model_name
         self.id = id
         self.cfg = cfg
-        self.model = build_parallel_model(self.model_name, id = self.id, pretrained=pretrained)
-        self.loss_func = loss_func
+        self.split_output = split_output
+        self.model = build_parallel_model(self.model_name, id = self.id, cfg=self.cfg, pretrained=pretrained, split_output=split_output)
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if self.split_output:
+            self.loss_func = OA_loss(self.device, self.cfg)
+        else:
+            self.loss_func = loss_func
         if metrics is not None:
             self.metrics = metrics
-            self.metrics['loss'] = loss_func
+            self.metrics['loss'] = self.loss_func
         else:
-            self.metrics = {'loss': loss_func}
+            self.metrics = {'loss': self.loss_func}
         self.lr = lr
         self.optimizer = optimizer(self.model.parameters(),self.lr)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
     
     def load_ckp(self, ckp_path):
-        checkpoint=torch.load(ckp_path, map_location=self.device)
-        self.model.load_state_dict(checkpoint)
+        ckp = torch.load(ckp_path, map_location=self.device)
+        self.model.load_state_dict(ckp['state_dict'])
+
+    def load_resume_ckp(self, ckp_path):
+        ckp = torch.load(ckp_path, map_location=self.device)
+        self.model.load_state_dict(ckp['state_dict'])
+        return ckp['epoch'], ckp['iter']
     
-    def save_ckp(self, ckp_path):
+    def save_ckp(self, ckp_path, epoch, i):
         if os.path.exists(os.path.dirname(ckp_path)):
-            torch.save(self.model.state_dict(), ckp_path)
+            torch.save(
+                        {'epoch': epoch+1,
+                        'iter': i+1,
+                        'state_dict':self. model.state_dict()},
+                        ckp_path
+                        )
         else:
             print("Save path not exist!!!")
     
@@ -96,7 +119,7 @@ class ChexPert_model():
 
         return self.predict(image)
 
-    def train(self, loader_dict, epochs=120, iter_log=100, use_lr_sch=False, ckp_dir='./checkpoint', writer=None, eval_metric='loss', mix_precision=False):
+    def train(self, loader_dict, epochs=120, iter_log=100, use_lr_sch=False, resume=False, ckp_dir='./experiment/checkpoint', writer=None, eval_metric='loss', mix_precision=False):
         if 'train' not in list(loader_dict.keys()):
             raise Exception("missing \'train\' keys in loader_dict!!!")
         if use_lr_sch:
@@ -105,9 +128,13 @@ class ChexPert_model():
             lr_sch = None
         
         best_metric = 0.0
-        if os.path.exists(ckp_dir):
-            shutil.rmtree(ckp_dir)
-        os.mkdir(ckp_dir)
+        if os.path.exists(ckp_dir) != True:
+            os.mkdir(ckp_dir)
+        if resume:
+            epoch_resume, iter_resume = self.load_resume_ckp(os.path.join(ckp_dir,'latest.ckpt'))
+        else:
+            epoch_resume = 0
+            iter_resume = 0
         modes = list(loader_dict.keys())
         history = dict.fromkeys(modes, {})
         if mix_precision:
@@ -115,10 +142,12 @@ class ChexPert_model():
             scaler = torch.cuda.amp.GradScaler()
         for mode in modes:
             history[mode] = dict.fromkeys(self.metrics.keys(), [])
-        for epoch in range(epochs):
+        for epoch in range(epoch_resume-1, epochs):
             start = time.time()
             for mode in modes:
                 running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
+                if mode == 'train':
+                    running_metrics.pop('auc', None)
                 ova_len = loader_dict[mode].dataset._num_image
                 n_iter = len(loader_dict[mode])
                 # n_log = n_iter//iter_log + 1
@@ -126,27 +155,30 @@ class ChexPert_model():
                     torch.set_grad_enabled(True)
                     self.model.train()
                     batch_weights = (1/iter_log)*np.ones(n_iter)
-                    batch_weights[-(n_iter%iter_log):] = 1/(n_iter%iter_log)
+                    if n_iter%iter_log:
+                        batch_weights[-(n_iter%iter_log):] = 1/(n_iter%iter_log)
                 else:
                     torch.set_grad_enabled(False)
                     self.model.eval()
                     batch_weights = (1/n_iter)*np.ones(n_iter)
-                for i, data in enumerate(loader_dict[mode]):
+                for i, data in tqdm.tqdm(enumerate(loader_dict[mode])):
                     imgs, labels = data[0].to(self.device), data[1].to(self.device)
                     if mix_precision:
                         with torch.cuda.amp.autocast():
-                            # loss = model(data)
                             preds = self.model(imgs)
                             loss = self.metrics['loss'](preds, labels)
                     else:
                         preds = self.model(imgs)
                         loss = self.metrics['loss'](preds, labels)
+                    if self.split_output:
+                        preds = torch.cat([aa for aa in preds], dim=-1)
+                    preds = nn.Sigmoid()(preds)
                     running_loss = loss.item()*batch_weights[i]
-                    for key in list(self.metrics.keys()):
+                    for key in list(running_metrics.keys()):
                         if key == 'loss':
                             running_metrics[key] += running_loss
                         else:
-                            running_metrics[key] += self.metrics[key](nn.Sigmoid()(preds), labels).cpu().numpy()*batch_weights[i]
+                            running_metrics[key] += self.metrics[key](preds, labels).cpu().numpy()*batch_weights[i]
                     if mode == 'train':
                         self.optimizer.zero_grad()
                         if mix_precision:
@@ -161,23 +193,27 @@ class ChexPert_model():
                             s = get_str(running_metrics, mode, s)
                             running_metrics_test = self.test(loader_dict[modes[-1]], mix_precision)
                             s = get_str(running_metrics_test, modes[-1], s)
-                            if running_metrics_test[eval_metric].mean() > best_metric:
-                                best_metric = running_metrics_test[eval_metric].mean()
-                                torch.save(self.model.state_dict(), os.path.join(ckp_dir,'epoch'+str(epoch+1)+'.pt'))
-                                print('new checkpoint saved!')
-                            if writer is not None:
-                                for key in list(self.metrics.keys()):
-                                    writer.add_scalars(key, {mode: running_metrics[key].mean()}, i+1)
+                            s = s[:-1] + " - mean_"+eval_metric+" {:.3f}".format(running_metrics_test[eval_metric].mean())
+                            self.save_ckp(os.path.join(ckp_dir,'latest.ckpt'), epoch, i)
                             running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
+                            running_metrics.pop('auc', None)
                             end = time.time()
                             s = s[:-1] + " ({:.1f}s)".format(end-start)
                             print(s)
+                            if running_metrics_test[eval_metric].mean() > best_metric:
+                                best_metric = running_metrics_test[eval_metric].mean()
+                                shutil.copyfile(os.path.join(ckp_dir,'latest.ckpt'), os.path.join(ckp_dir,'epoch'+str(epoch+1)+'_iter'+str(i+1)+'.ckpt'))
+                                print('new checkpoint saved!')
+                            if writer is not None:
+                                for key in list(running_metrics.keys()):
+                                    writer.add_scalars(key, {mode: running_metrics[key].mean()}, (epoch*ova_len)+(i+1))
+                            
                             start = time.time()
                 if mode == 'train':
                     s="Epoch [{}/{}] Iter [{}/{}]:\n".format(epoch+1, epochs, n_iter, n_iter)
                 s = get_str(running_metrics, mode, s)
             end = time.time()
-            s = s[:-1] + "({:.1f}s)".format(end-start)
+            s = s + "({:.1f}s)".format(end-start)
             print(s)
             if lr_sch is not None:
                 lr_sch.step()
@@ -198,13 +234,23 @@ class ChexPert_model():
             else:
                 preds = self.model(imgs)
                 loss = self.metrics['loss'](preds, labels)
+            if self.split_output:
+                preds = torch.cat([aa for aa in preds], dim=-1)
+            preds = nn.Sigmoid()(preds)
             iter_len = imgs.size()[0]
-            running_loss = loss.item()*iter_len/ova_len
-            for key in list(self.metrics.keys()):
-                if key == 'loss':
-                    running_metrics[key] += running_loss
-                else:
-                    running_metrics[key] += self.metrics[key](preds, labels).cpu().numpy()*iter_len/ova_len
+            if i == 0:
+                preds_stack = preds
+                labels_stack = labels
+                running_loss = loss.item()*iter_len/ova_len
+            else:
+                preds_stack = torch.cat((preds_stack, preds), 0)
+                labels_stack = torch.cat((labels_stack, labels), 0)
+                running_loss += loss.item()*iter_len/ova_len
+        for key in list(self.metrics.keys()):
+            if key == 'loss':
+                running_metrics[key] = running_loss
+            else:
+                running_metrics[key] = self.metrics[key](preds_stack, labels_stack).cpu().numpy()
         torch.set_grad_enabled(True)
         self.model.train()
         return running_metrics
@@ -225,4 +271,3 @@ class ChexPert_model():
         for key in list(self.metrics.keys()):
             s += "{}: {:.3f} - ".format(key, running_metrics[key])
         print(s[:-2])
-        return running_metrics
