@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import numpy as np
+from metrics import OA_loss
 from sklearn import metrics
 import time, os, cv2, shutil
 from data.utils import transform
@@ -12,7 +13,7 @@ from resnest.torch import resnest50, resnest101, resnest200, resnest269
 from efficientnet_pytorch import EfficientNet
 import tqdm
 
-def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_output=False):
+def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_output=False, modify_gp=False):
     if model_name == 'resnest':
         if id == '50':
             pre_name = resnest50
@@ -27,7 +28,7 @@ def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_outpu
         for param in pre_model.parameters():
             param.requires_grad = True
         if split_output:
-            model = ResNeSt(pre_model, cfg)
+            model = ResNeSt(pre_model, cfg, modify_gp)
         else:
             model = ResNeSt_parallel(pre_model, 5)
     else:
@@ -36,7 +37,7 @@ def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_outpu
         for param in pre_model.parameters():
             param.requires_grad = True
         if split_output:
-            model = Efficient(pre_model, cfg)
+            model = Efficient(pre_model, cfg, modify_gp)
         else:
             model = Efficient_parallel(pre_model, 5)
     return model
@@ -59,12 +60,14 @@ class ChexPert_model():
     'Atelectasis',
     'Pleural Effusion'
     ]
-    def __init__(self, cfg, optimizer, split_output=False, loss_func=None, model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
+    def __init__(self, cfg, optimizer, split_output=False, modify_gp=False, loss_func=None,
+                 model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
         self.model_name = model_name
         self.id = id
         self.cfg = cfg
         self.split_output = split_output
-        self.model = build_parallel_model(self.model_name, id = self.id, cfg=self.cfg, pretrained=pretrained, split_output=split_output)
+        self.modify_gp = modify_gp
+        self.model = build_parallel_model(self.model_name, self.id, self.cfg, pretrained, self.split_output, self.modify_gp)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         if self.split_output:
             self.loss_func = OA_loss(self.device, self.cfg)
