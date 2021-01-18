@@ -210,7 +210,6 @@ class ChexPert_model():
                                 best_metric = running_metrics_test[eval_metric].mean()
                                 shutil.copyfile(os.path.join(ckp_dir,'latest.ckpt'), os.path.join(ckp_dir,'epoch'+str(epoch+1)+'_iter'+str(i+1)+'.ckpt'))
                                 print('new checkpoint saved!')
-                            
                             start = time.time()
                 if mode == 'train':
                     s="Epoch [{}/{}] Iter [{}/{}]:\n".format(epoch+1, epochs, n_iter, n_iter)
