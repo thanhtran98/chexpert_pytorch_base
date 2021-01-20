@@ -136,7 +136,7 @@ class ChexPert_model():
         if resume:
             epoch_resume, iter_resume = self.load_resume_ckp(os.path.join(ckp_dir,'latest.ckpt'))
         else:
-            epoch_resume = 0
+            epoch_resume = 1
             iter_resume = 0
         modes = list(loader_dict.keys())
         history = dict.fromkeys(modes, {})
