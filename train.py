@@ -237,6 +237,9 @@ class ChexPert_model():
                 print('current lr: {:.4f}'.format(lr_sch.get_lr()[0]))
         return history
 
+    def conditional_train(self):
+        pass
+
     def test(self, loader, mix_precision=False, ensemble=False):
         torch.set_grad_enabled(False)
         self.model.eval()
