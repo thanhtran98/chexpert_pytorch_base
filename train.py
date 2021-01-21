@@ -9,6 +9,7 @@ import time, os, cv2, shutil
 from data.utils import transform
 from tensorboardX import SummaryWriter
 from model.models import ResNeSt_parallel, Efficient_parallel, Efficient, ResNeSt
+from model.classifier import Classifier
 from resnest.torch import resnest50, resnest101, resnest200, resnest269
 from efficientnet_pytorch import EfficientNet
 import tqdm
@@ -60,14 +61,19 @@ class ChexPert_model():
     'Atelectasis',
     'Pleural Effusion'
     ]
-    def __init__(self, cfg, optimizer, split_output=False, modify_gp=False, loss_func=None,
+    def __init__(self, cfg, optimizer, origin=True, split_output=False, modify_gp=False, loss_func=None,
                  model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
         self.model_name = model_name
         self.id = id
         self.cfg = cfg
         self.split_output = split_output
         self.modify_gp = modify_gp
-        self.model = build_parallel_model(self.model_name, self.id, self.cfg, pretrained, self.split_output, self.modify_gp)
+        if origin:
+            self.split_output = True
+            self.modify_gp = True
+            self.model = Classifier(self.cfg)
+        else:
+            self.model = build_parallel_model(self.model_name, self.id, self.cfg, pretrained, self.split_output, self.modify_gp)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         if self.split_output:
             self.loss_func = OA_loss(self.device, self.cfg)
@@ -109,7 +115,13 @@ class ChexPert_model():
         self.model.eval()
         with torch.no_grad() as tng:
             preds = self.model(image)
-            preds = preds.cpu().numpy()
+            if self.split_output:
+                preds = nn.Sigmoid()(torch.cat([aa for aa in preds], axis=-1))
+                preds = preds.cpu().numpy()
+                # preds = np.concatenate([aa.cpu().numpy() for aa in preds], axis=-1)
+            else:
+                preds = nn.Sigmoid()(preds)
+                preds = preds.cpu().numpy()
 
         return preds
 
@@ -210,6 +222,7 @@ class ChexPert_model():
                                 best_metric = running_metrics_test[eval_metric].mean()
                                 shutil.copyfile(os.path.join(ckp_dir,'latest.ckpt'), os.path.join(ckp_dir,'epoch'+str(epoch+1)+'_iter'+str(i+1)+'.ckpt'))
                                 print('new checkpoint saved!')
+                            
                             start = time.time()
                 if mode == 'train':
                     s="Epoch [{}/{}] Iter [{}/{}]:\n".format(epoch+1, epochs, n_iter, n_iter)
@@ -222,7 +235,7 @@ class ChexPert_model():
                 print('current lr: {:.4f}'.format(lr_sch.get_lr()[0]))
         return history
 
-    def test(self, loader, mix_precision=False):
+    def test(self, loader, mix_precision=False, ensemble=False):
         torch.set_grad_enabled(False)
         self.model.eval()
         running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
@@ -239,6 +252,9 @@ class ChexPert_model():
             if self.split_output:
                 preds = torch.cat([aa for aa in preds], dim=-1)
             preds = nn.Sigmoid()(preds)
+            if ensemble:
+                preds = torch.mm(preds,self.ensemble_weights)
+                loss = nn.MSELoss()(preds, labels)
             iter_len = imgs.size()[0]
             if i == 0:
                 preds_stack = preds
@@ -273,3 +289,31 @@ class ChexPert_model():
         for key in list(self.metrics.keys()):
             s += "{}: {:.3f} - ".format(key, running_metrics[key])
         print(s[:-2])
+
+    def ensemble(self, loader, test_loader, init_lr=0.01, log_step=100):
+        n_class = len(self.cfg.num_classes)
+        w = np.random.rand(n_class, n_class)
+        iden_matrix = np.diag(np.ones(n_class))
+        lr = init_lr
+        step = log_step
+        start = time.time()
+        for i, data in enumerate(loader):
+            imgs, labels = data[0].to(self.device), data[1]
+            preds = self.predict(imgs)
+            labels = labels.numpy()
+            grad = (preds.T.dot(preds) + 0.01*iden_matrix).dot(w) - preds.T.dot(labels)
+            w -= lr*grad
+            if (i+1)%step == 0:
+                print(w)
+                print(grad)
+                # lr = decayed_learning_rate(i+1, ilr, decay_steps=step)
+                # print(lr)
+                end = time.time()
+                print('iter {:d} time takes: {:.3f}s'.format(i+1, end-start))
+                start = time.time()
+                if (i+1)//step==20:
+                    break
+        self.ensemble_weights = torch.from_numpy(w).float().to(self.device)
+        print('Done Essemble!!!')
+        metrics = self.test(test_loader, ensemble=True)
+        return metrics
