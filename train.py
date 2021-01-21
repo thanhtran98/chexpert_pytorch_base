@@ -220,7 +220,7 @@ class ChexPert_model():
                             end = time.time()
                             s = s[:-1] + " ({:.1f}s)".format(end-start)
                             print(s)
-                            if running_metrics_test[eval_metric].mean() > best_metric:
+                            if metric_eval.mean() > best_metric:
                                 best_metric = running_metrics_test[eval_metric].mean()
                                 shutil.copyfile(os.path.join(ckp_dir,'latest.ckpt'), os.path.join(ckp_dir,'epoch'+str(epoch+1)+'_iter'+str(i+1)+'.ckpt'))
                                 print('new checkpoint saved!')
