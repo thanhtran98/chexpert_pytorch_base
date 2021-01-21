@@ -162,4 +162,4 @@ class Classifier(nn.Module):
             logit = logit.squeeze(-1).squeeze(-1)
             logits.append(logit)
 
-        return (logits, logit_maps)
+        return logits
