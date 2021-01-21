@@ -61,6 +61,7 @@ class ChexPert_model():
     'Atelectasis',
     'Pleural Effusion'
     ]
+    id_obs = [2, 5, 6, 8, 10]
     def __init__(self, cfg, optimizer, origin=True, split_output=False, modify_gp=False, loss_func=None,
                  model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
         self.model_name = model_name
@@ -208,7 +209,8 @@ class ChexPert_model():
                             s = get_str(running_metrics, mode, s)
                             running_metrics_test = self.test(loader_dict[modes[-1]], mix_precision)
                             s = get_str(running_metrics_test, modes[-1], s)
-                            s = s[:-1] + " - mean_"+eval_metric+" {:.3f}".format(running_metrics_test[eval_metric].mean())
+                            metric_eval = running_metrics_test[eval_metric][self.id_obs]
+                            s = s[:-1] + " - mean_"+eval_metric+" {:.3f}".format(metric_eval.mean())
                             self.save_ckp(os.path.join(ckp_dir,'latest.ckpt'), epoch, i)
                             if writer is not None:
                                 for key in list(running_metrics.keys()):
