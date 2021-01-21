@@ -80,12 +80,16 @@ class ImageDataset(Dataset):
 
 
 class ImageDataset_full(Dataset):
-    def __init__(self, label_path, cfg, mode='train'):
+    def __init__(self, label_path, cfg, mode='train', smooth_mode='pos'):
         self.cfg = cfg
         self._label_header = None
         self._image_paths = []
         self._labels = []
         self._mode = mode
+        if smooth_mode=='pos':
+            self.smooth_range = (0.55, 0.85)
+        elif smooth_mode=='neg':
+            self.smooth_range = (0, 0.3)
         # self.dict = [{'1.0': '1', '': '0', '0.0': '0', '-1.0': '0'},
         #              {'1.0': '1', '': '0', '0.0': '0', '-1.0': '1'}, ]
         self.dict = {'1.0': 1.0, '': 0.0, '0.0': 0.0, '-1.0': -1.0}
@@ -120,7 +124,7 @@ class ImageDataset_full(Dataset):
             image = GetTransforms(image, type=self.cfg.use_transforms_type)
         image = np.array(image)
         image = user_transform(image, self.cfg)
-        labels = [random.uniform(0.55, 0.85) if x==-1.0 else x for x in self._labels[idx]]
+        labels = [random.uniform(self.smooth_range[0], self.smooth_range[1]) if x==-1.0 else x for x in self._labels[idx]]
         labels = np.array(labels).astype(np.float32)
 
         path = self._image_paths[idx]
