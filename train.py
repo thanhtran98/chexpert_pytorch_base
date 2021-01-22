@@ -242,7 +242,7 @@ class ChexPert_model():
                         if (i+1)%iter_log == 0:
                             s="Epoch [{}/{}] Iter [{}/{}]:\n".format(epoch+1, epochs, i+1, n_iter)
                             s = get_str(running_metrics, mode, s)
-                            running_metrics_test = self.test(loader_dict[modes[-1]], mix_precision)
+                            running_metrics_test = self.test(loader_dict[modes[-1]], mix_precision, False, conditional_training, tranform2leaf_matrix)
                             s = get_str(running_metrics_test, modes[-1], s)
                             metric_eval = running_metrics_test[eval_metric][self.id_obs]
                             s = s[:-1] + " - mean_"+eval_metric+" {:.3f}".format(metric_eval.mean())
@@ -272,10 +272,7 @@ class ChexPert_model():
                 print('current lr: {:.4f}'.format(lr_sch.get_lr()[0]))
         return history
 
-    def conditional_train(self):
-        pass
-
-    def test(self, loader, mix_precision=False, ensemble=False):
+    def test(self, loader, mix_precision=False, ensemble=False, conditional_training=False, tranform2leaf_matrix=None):
         torch.set_grad_enabled(False)
         self.model.eval()
         running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
@@ -285,12 +282,20 @@ class ChexPert_model():
             if mix_precision:
                 with torch.cuda.amp.autocast():
                     preds = self.model(imgs)
+                    if self.split_output:
+                        preds = torch.cat([aa for aa in preds], dim=-1)
+                    if conditional_training:
+                        preds = torch.mm(preds,tranform2leaf_matrix)
+                        labels = torch.mm(labels,tranform2leaf_matrix)
                     loss = self.metrics['loss'](preds, labels)
             else:
                 preds = self.model(imgs)
+                if self.split_output:
+                    preds = torch.cat([aa for aa in preds], dim=-1)
+                if conditional_training:
+                    preds = torch.mm(preds,tranform2leaf_matrix)
+                    labels = torch.mm(labels,tranform2leaf_matrix)
                 loss = self.metrics['loss'](preds, labels)
-            if self.split_output:
-                preds = torch.cat([aa for aa in preds], dim=-1)
             preds = nn.Sigmoid()(preds)
             if ensemble:
                 preds = torch.mm(preds,self.ensemble_weights)
