@@ -16,6 +16,7 @@ import tqdm
 
 def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_output=False, modify_gp=False):
     if model_name == 'resnest':
+        childs_cut = 9
         if id == '50':
             pre_name = resnest50
         elif id == '101':
@@ -33,15 +34,19 @@ def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_outpu
         else:
             model = ResNeSt_parallel(pre_model, 5)
     else:
+        childs_cut = 6
         pre_name = 'efficientnet-'+id
-        pre_model = EfficientNet.from_pretrained(pre_name)
+        if pretrained:
+            pre_model = EfficientNet.from_pretrained(pre_name)
+        else:
+            pre_model = EfficientNet.from_name(pre_name)
         for param in pre_model.parameters():
             param.requires_grad = True
         if split_output:
             model = Efficient(pre_model, cfg, modify_gp)
         else:
             model = Efficient_parallel(pre_model, 5)
-    return model
+    return model, childs_cut
 
 def get_str(metrics, mode, s):
     for key in list(metrics.keys()):
@@ -61,7 +66,16 @@ class ChexPert_model():
     'Atelectasis',
     'Pleural Effusion'
     ]
-    id_obs = [2, 5, 6, 8, 10]
+    id_obs = [2,5,6,8,10]
+    id_leaf = [2,4,5,6,7,8]
+    id_parent = [aa for aa in range(14) if aa not in id_leaf]
+    M = np.array([[0,1,-2,0,0,0,0,0,0,0,0,0,0,0],
+                  [0,0,0,1,-2,0,0,0,0,0,0,0,0,0],
+                  [0,0,0,1,0,-2,0,0,0,0,0,0,0,0],
+                  [0,0,0,1,0,0,-2,0,0,0,0,0,0,0],
+                  [0,0,0,1,0,0,0,-2,0,0,0,0,0,0],
+                  [0,0,0,1,0,0,0,0,-2,0,0,0,0,0]])
+    
     def __init__(self, cfg, optimizer, origin=True, split_output=False, modify_gp=False, loss_func=None,
                  model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
         self.model_name = model_name
@@ -74,7 +88,7 @@ class ChexPert_model():
             self.modify_gp = True
             self.model = Classifier(self.cfg)
         else:
-            self.model = build_parallel_model(self.model_name, self.id, self.cfg, pretrained, self.split_output, self.modify_gp)
+            self.model, self.childs_cut = build_parallel_model(self.model_name, self.id, self.cfg, pretrained, self.split_output, self.modify_gp)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         if self.split_output:
             self.loss_func = OA_loss(self.device, self.cfg)
@@ -89,6 +103,14 @@ class ChexPert_model():
         self.optimizer = optimizer(self.model.parameters(),self.lr)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
+
+    def freeze_head(self):
+        ct = 0
+        for child in self.model.children():
+            ct += 1
+            if ct < self.childs_cut:
+                for param in child.parameters():
+                    param.requires_grad = False
     
     def load_ckp(self, ckp_path):
         ckp = torch.load(ckp_path, map_location=self.device)
@@ -135,14 +157,19 @@ class ChexPert_model():
 
         return self.predict(image)
 
-    def train(self, loader_dict, epochs=120, iter_log=100, use_lr_sch=False, resume=False, ckp_dir='./experiment/checkpoint', writer=None, eval_metric='loss', mix_precision=False):
+    def train(self, loader_dict, epochs=120, iter_log=100, use_lr_sch=False, resume=False, ckp_dir='./experiment/checkpoint',
+              writer=None, eval_metric='loss', mix_precision=False, conditional_training=False):
         if 'train' not in list(loader_dict.keys()):
             raise Exception("missing \'train\' keys in loader_dict!!!")
         if use_lr_sch:
             lr_sch = torch.optim.lr_scheduler.StepLR(self.optimizer, int(epochs*2/3), self.lr/3)
         else:
             lr_sch = None
-        
+        if conditional_training:
+            tranform2leaf_matrix = np.zeros((len(self.id_leaf), len(self.cfg.num_classes)))
+            for i, leaf_id in enumerate(self.id_leaf):
+                tranform2leaf_matrix[i][leaf_id] = 1.0
+            tranform2leaf_matrix = torch.from_numpy(tranform2leaf_matrix).to(self.device)
         best_metric = 0.0
         if os.path.exists(ckp_dir) != True:
             os.mkdir(ckp_dir)
@@ -182,9 +209,15 @@ class ChexPert_model():
                     if mix_precision:
                         with torch.cuda.amp.autocast():
                             preds = self.model(imgs)
+                            if conditional_training:
+                                preds = tranform2leaf_matrix.dot(preds)
+                                labels = tranform2leaf_matrix.dot(labels)
                             loss = self.metrics['loss'](preds, labels)
                     else:
                         preds = self.model(imgs)
+                        if conditional_training:
+                            preds = tranform2leaf_matrix.dot(preds)
+                            labels = tranform2leaf_matrix.dot(labels)
                         loss = self.metrics['loss'](preds, labels)
                     if self.split_output:
                         preds = torch.cat([aa for aa in preds], dim=-1)
@@ -259,6 +292,7 @@ class ChexPert_model():
             preds = nn.Sigmoid()(preds)
             if ensemble:
                 preds = torch.mm(preds,self.ensemble_weights)
+                labels = labels[:,self.id_obs]
                 loss = nn.MSELoss()(preds, labels)
             iter_len = imgs.size()[0]
             if i == 0:
@@ -295,9 +329,9 @@ class ChexPert_model():
             s += "{}: {:.3f} - ".format(key, running_metrics[key])
         print(s[:-2])
 
-    def ensemble(self, loader, test_loader, init_lr=0.01, log_step=100):
+    def ensemble(self, loader, test_loader, type='basic', init_lr=0.01, log_step=100):
         n_class = len(self.cfg.num_classes)
-        w = np.random.rand(n_class, n_class)
+        w = np.random.rand(n_class, len(self.id_obs))
         iden_matrix = np.diag(np.ones(n_class))
         lr = init_lr
         step = log_step
@@ -306,11 +340,16 @@ class ChexPert_model():
             imgs, labels = data[0].to(self.device), data[1]
             preds = self.predict(imgs)
             labels = labels.numpy()
-            grad = (preds.T.dot(preds) + 0.01*iden_matrix).dot(w) - preds.T.dot(labels)
+            labels = labels[:,self.id_obs]
+            if type=='basic':
+                grad = (preds.T.dot(preds) + 0.1*iden_matrix).dot(w) - preds.T.dot(labels)
+            elif type=='b_constraint':
+                grad = (preds.T.dot(preds) + 0.1*iden_matrix + 2*self.M.T.dot(self.M)).dot(w) + - preds.T.dot(labels)
+            else:
+                raise Exception("Not support this type!!!")
             w -= lr*grad
             if (i+1)%step == 0:
                 print(w)
-                print(grad)
                 # lr = decayed_learning_rate(i+1, ilr, decay_steps=step)
                 # print(lr)
                 end = time.time()

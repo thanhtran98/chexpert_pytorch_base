@@ -80,7 +80,18 @@ class ImageDataset(Dataset):
 
 
 class ImageDataset_full(Dataset):
-    def __init__(self, label_path, cfg, mode='train', smooth_mode='pos'):
+    leaves_id = [2,4,5,6,7,8]
+    parents_id = [0,1,3,9,10,11,12,13]
+    def __init__(self, label_path, cfg, mode='train', smooth_mode='pos', conditional_training=False):
+        """Image generator
+
+        Args:
+            label_path (str): path to .csv file contains img paths and class labels
+            cfg (str): path to .json file contains model configuration
+            mode (str, optional): define which mode you are using. Defaults to 'train'.
+            smooth_mode (str, optional): smoothing label regularization. Defaults to 'pos'.
+            conditional_training (bool, optional): choosing train with conditional training or not. Defaults to False.
+        """
         self.cfg = cfg
         self._label_header = None
         self._image_paths = []
@@ -100,18 +111,15 @@ class ImageDataset_full(Dataset):
                 labels = []
                 fields = line.strip('\n').split(',')
                 image_path = fields[0]
-                flg_enhance = False
-                for index, value in enumerate(fields[5:]):
-                    labels.append(self.dict.get(value))
-                # labels = ([self.dict.get(n, n) for n in fields[5:]])
-                # labels = list(map(int, labels))
-                self._image_paths.append(image_path)
-                assert os.path.exists(image_path), image_path
-                self._labels.append(labels)
-                # if flg_enhance and self._mode == 'train':
-                #     for i in range(self.cfg.enhance_times):
-                #         self._image_paths.append(image_path)
-                #         self._labels.append(labels)
+
+                # If not using conditional training => Load all images
+                # Otherwise, only load images with parent label are positive or uncertain
+                if not conditional_training or (self.dict.get(fields[5:][1]) != 0.0 or self.dict.get(fields[5:][3]) != 0.0):
+                    for index, value in enumerate(fields[5:]):
+                        labels.append(self.dict.get(value))
+                    self._image_paths.append(image_path)
+                    assert os.path.exists(image_path), image_path
+                    self._labels.append(labels)
         self._num_image = len(self._image_paths)
 
     def __len__(self):
