@@ -68,7 +68,7 @@ class ChexPert_model():
     ]
     id_obs = [2,5,6,8,10]
     id_leaf = [2,4,5,6,7,8]
-    id_parent = [aa for aa in range(14) if aa not in id_leaf]
+    id_parent = [0,1,3,9,10,11,12,13]
     M = np.array([[0,1,-2,0,0,0,0,0,0,0,0,0,0,0],
                   [0,0,0,1,-2,0,0,0,0,0,0,0,0,0],
                   [0,0,0,1,0,-2,0,0,0,0,0,0,0,0],
@@ -90,10 +90,10 @@ class ChexPert_model():
         else:
             self.model, self.childs_cut = build_parallel_model(self.model_name, self.id, self.cfg, pretrained, self.split_output, self.modify_gp)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        if self.split_output:
-            self.loss_func = OA_loss(self.device, self.cfg)
-        else:
-            self.loss_func = loss_func
+        # if self.split_output:
+        #     self.loss_func = OA_loss(self.device, self.cfg)
+        # else:
+        self.loss_func = loss_func
         if metrics is not None:
             self.metrics = metrics
             self.metrics['loss'] = self.loss_func
@@ -166,10 +166,10 @@ class ChexPert_model():
         else:
             lr_sch = None
         if conditional_training:
-            tranform2leaf_matrix = np.zeros((len(self.id_leaf), len(self.cfg.num_classes)))
+            tranform2leaf_matrix = np.zeros((len(self.cfg.num_classes), len(self.id_leaf)))
             for i, leaf_id in enumerate(self.id_leaf):
-                tranform2leaf_matrix[i][leaf_id] = 1.0
-            tranform2leaf_matrix = torch.from_numpy(tranform2leaf_matrix).to(self.device)
+                tranform2leaf_matrix[leaf_id][i] = 1.0
+            tranform2leaf_matrix = torch.from_numpy(tranform2leaf_matrix).float().to(self.device)
         best_metric = 0.0
         if os.path.exists(ckp_dir) != True:
             os.mkdir(ckp_dir)
@@ -209,18 +209,20 @@ class ChexPert_model():
                     if mix_precision:
                         with torch.cuda.amp.autocast():
                             preds = self.model(imgs)
+                            if self.split_output:
+                                preds = torch.cat([aa for aa in preds], dim=-1)
                             if conditional_training:
-                                preds = tranform2leaf_matrix.dot(preds)
-                                labels = tranform2leaf_matrix.dot(labels)
+                                preds = torch.mm(preds,tranform2leaf_matrix)
+                                labels = torch.mm(labels,tranform2leaf_matrix)
                             loss = self.metrics['loss'](preds, labels)
                     else:
                         preds = self.model(imgs)
+                        if self.split_output:
+                            preds = torch.cat([aa for aa in preds], dim=-1)
                         if conditional_training:
-                            preds = tranform2leaf_matrix.dot(preds)
-                            labels = tranform2leaf_matrix.dot(labels)
+                            preds = torch.mm(preds,tranform2leaf_matrix)
+                            labels = torch.mm(labels,tranform2leaf_matrix)
                         loss = self.metrics['loss'](preds, labels)
-                    if self.split_output:
-                        preds = torch.cat([aa for aa in preds], dim=-1)
                     preds = nn.Sigmoid()(preds)
                     running_loss = loss.item()*batch_weights[i]
                     for key in list(running_metrics.keys()):
