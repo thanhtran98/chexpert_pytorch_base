@@ -13,7 +13,7 @@
     "use_transforms_type": "Aug",
     "gaussian_blur": 3,
     "border_pad": "pixel_mean",
-    "num_classes": [1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    "num_classes": [1,1,1,1,1],
     "batch_weight": true,
     "enhance_index": [2,6],
     "enhance_times": 1,

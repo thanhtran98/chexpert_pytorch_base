@@ -82,6 +82,7 @@ class ImageDataset(Dataset):
 class ImageDataset_full(Dataset):
     leaves_id = [2,4,5,6,7,8]
     parents_id = [0,1,3,9,10,11,12,13]
+    observes_id = [2,5,6,8,10]
     def __init__(self, label_path, cfg, mode='train', smooth_mode='pos', conditional_training=False):
         """Image generator
 
@@ -114,7 +115,7 @@ class ImageDataset_full(Dataset):
 
                 # If not using conditional training => Load all images
                 # Otherwise, only load images with parent label are positive or uncertain
-                if not conditional_training or (self.dict.get(fields[5:][1]) != 0.0 or self.dict.get(fields[5:][3]) != 0.0):
+                if mode=='dev' or (not conditional_training or (self.dict.get(fields[5:][1]) != 0.0 or self.dict.get(fields[5:][3]) != 0.0)):
                     for index, value in enumerate(fields[5:]):
                         labels.append(self.dict.get(value))
                     self._image_paths.append(image_path)

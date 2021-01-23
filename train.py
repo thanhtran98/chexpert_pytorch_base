@@ -8,10 +8,11 @@ from sklearn import metrics
 import time, os, cv2, shutil
 from data.utils import transform
 from tensorboardX import SummaryWriter
-from model.models import ResNeSt_parallel, Efficient_parallel, Efficient, ResNeSt
+from model.models import ResNeSt_parallel, Efficient_parallel, Efficient, ResNeSt, Dense, Dense_parallel
 from model.classifier import Classifier
 from resnest.torch import resnest50, resnest101, resnest200, resnest269
 from efficientnet_pytorch import EfficientNet
+from torchvision.models import densenet121, densenet161, densenet169, densenet201
 import tqdm
 
 def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_output=False, modify_gp=False):
@@ -33,7 +34,7 @@ def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_outpu
             model = ResNeSt(pre_model, cfg, modify_gp)
         else:
             model = ResNeSt_parallel(pre_model, 5)
-    else:
+    elif model_name == 'efficient' or model_name == 'efficientnet':
         childs_cut = 6
         pre_name = 'efficientnet-'+id
         if pretrained:
@@ -46,6 +47,26 @@ def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_outpu
             model = Efficient(pre_model, cfg, modify_gp)
         else:
             model = Efficient_parallel(pre_model, 5)
+    elif model_name == 'dense' or model_name == 'densenet':
+        childs_cut = 2
+        if id == '121':
+            pre_name = densenet121
+        elif id == '161':
+            pre_name = densenet161
+        elif id == '169':
+            pre_name = densenet169
+        else:
+            pre_name = densenet201
+        pre_model = pre_name(pretrained=pretrained)
+        # pre_model = EfficientNet.from_pretrained('efficientnet-b4')
+        for param in pre_model.parameters():
+            param.requires_grad = True
+        if split_output:
+            model = Dense(pre_model, cfg, modify_gp)
+        else:
+            model = Dense_parallel(pre_model, 5)
+    else:
+        raise Exception("Not support this model!!!!")
     return model, childs_cut
 
 def get_str(metrics, mode, s):
@@ -77,10 +98,13 @@ class ChexPert_model():
                   [0,0,0,1,0,0,0,0,-2,0,0,0,0,0]])
     
     def __init__(self, cfg, optimizer, origin=True, split_output=False, modify_gp=False, loss_func=None,
-                 model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True):
+                 model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True, full_classes=False):
         self.model_name = model_name
         self.id = id
         self.cfg = cfg
+        self.full_classes = full_classes
+        if self.full_classes:
+            self.cfg.num_classes = 14*[1]
         self.split_output = split_output
         self.modify_gp = modify_gp
         if origin:
@@ -165,11 +189,6 @@ class ChexPert_model():
             lr_sch = torch.optim.lr_scheduler.StepLR(self.optimizer, int(epochs*2/3), self.lr/3)
         else:
             lr_sch = None
-        if conditional_training:
-            tranform2leaf_matrix = np.zeros((len(self.cfg.num_classes), len(self.id_leaf)))
-            for i, leaf_id in enumerate(self.id_leaf):
-                tranform2leaf_matrix[leaf_id][i] = 1.0
-            tranform2leaf_matrix = torch.from_numpy(tranform2leaf_matrix).float().to(self.device)
         best_metric = 0.0
         if os.path.exists(ckp_dir) != True:
             os.mkdir(ckp_dir)
@@ -212,16 +231,16 @@ class ChexPert_model():
                             if self.split_output:
                                 preds = torch.cat([aa for aa in preds], dim=-1)
                             if conditional_training:
-                                preds = torch.mm(preds,tranform2leaf_matrix)
-                                labels = torch.mm(labels,tranform2leaf_matrix)
+                                preds = preds[:,self.id_leaf]
+                                labels = labels[:,self.id_leaf]
                             loss = self.metrics['loss'](preds, labels)
                     else:
                         preds = self.model(imgs)
                         if self.split_output:
                             preds = torch.cat([aa for aa in preds], dim=-1)
                         if conditional_training:
-                            preds = torch.mm(preds,tranform2leaf_matrix)
-                            labels = torch.mm(labels,tranform2leaf_matrix)
+                            preds = preds[:,self.id_leaf]
+                            labels = labels[:,self.id_leaf]
                         loss = self.metrics['loss'](preds, labels)
                     preds = nn.Sigmoid()(preds)
                     running_loss = loss.item()*batch_weights[i]
@@ -242,9 +261,9 @@ class ChexPert_model():
                         if (i+1)%iter_log == 0:
                             s="Epoch [{}/{}] Iter [{}/{}]:\n".format(epoch+1, epochs, i+1, n_iter)
                             s = get_str(running_metrics, mode, s)
-                            running_metrics_test = self.test(loader_dict[modes[-1]], mix_precision, False, conditional_training, tranform2leaf_matrix)
+                            running_metrics_test = self.test(loader_dict[modes[-1]], mix_precision, False, conditional_training)
                             s = get_str(running_metrics_test, modes[-1], s)
-                            if conditional_training:
+                            if conditional_training or (not self.full_classes):
                                 metric_eval = running_metrics_test[eval_metric]
                             else:
                                 metric_eval = running_metrics_test[eval_metric][self.id_obs]
@@ -275,7 +294,7 @@ class ChexPert_model():
                 print('current lr: {:.4f}'.format(lr_sch.get_lr()[0]))
         return history
 
-    def test(self, loader, mix_precision=False, ensemble=False, conditional_training=False, tranform2leaf_matrix=None):
+    def test(self, loader, mix_precision=False, ensemble=False, conditional_training=False):
         torch.set_grad_enabled(False)
         self.model.eval()
         running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
@@ -288,16 +307,16 @@ class ChexPert_model():
                     if self.split_output:
                         preds = torch.cat([aa for aa in preds], dim=-1)
                     if conditional_training:
-                        preds = torch.mm(preds,tranform2leaf_matrix)
-                        labels = torch.mm(labels,tranform2leaf_matrix)
+                        preds = preds[:,self.id_leaf]
+                        labels = labels[:,self.id_leaf]
                     loss = self.metrics['loss'](preds, labels)
             else:
                 preds = self.model(imgs)
                 if self.split_output:
                     preds = torch.cat([aa for aa in preds], dim=-1)
                 if conditional_training:
-                    preds = torch.mm(preds,tranform2leaf_matrix)
-                    labels = torch.mm(labels,tranform2leaf_matrix)
+                    preds = preds[:,self.id_leaf]
+                    labels = labels[:,self.id_leaf]
                 loss = self.metrics['loss'](preds, labels)
             preds = nn.Sigmoid()(preds)
             if ensemble:
