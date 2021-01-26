@@ -341,24 +341,39 @@ class ChexPert_model():
         self.model.train()
         return running_metrics
 
-    def evaluate(self, loader):
+    def predict_loader(self, loader, mix_precision=False, ensemble=False, conditional_training=False):
         torch.set_grad_enabled(False)
         self.model.eval()
-        with torch.no_grad() as tng:
-            ova_len = loader.dataset._num_image
-            running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
-            for i, data in enumerate(loader):
-                imgs, targets = data[0].to(self.device), data[1].to(self.device)
+        for i, data in enumerate(loader):
+            imgs, labels = data[0].to(self.device), data[1].to(self.device)
+            if mix_precision:
+                with torch.cuda.amp.autocast():
+                    preds = self.model(imgs)
+                    if self.split_output:
+                        preds = torch.cat([aa for aa in preds], dim=-1)
+                    if conditional_training:
+                        preds = preds[:,self.id_leaf]
+                        labels = labels[:,self.id_leaf]
+            else:
                 preds = self.model(imgs)
-                iter_len = imgs.size()[0]
-                for key in list(self.metrics.keys()):
-                    running_metrics[key] += self.metrics[key](preds, targets).item()*iter_len/ova_len
-        s=""
-        for key in list(self.metrics.keys()):
-            s += "{}: {:.3f} - ".format(key, running_metrics[key])
-        print(s[:-2])
+                if self.split_output:
+                    preds = torch.cat([aa for aa in preds], dim=-1)
+                if conditional_training:
+                    preds = preds[:,self.id_leaf]
+                    labels = labels[:,self.id_leaf]
+            preds = nn.Sigmoid()(preds)
+            if ensemble:
+                preds = torch.mm(preds,self.ensemble_weights)
+                labels = labels[:,self.id_obs]
+            if i == 0:
+                preds_stack = preds
+                labels_stack = labels
+            else:
+                preds_stack = torch.cat((preds_stack, preds), 0)
+                labels_stack = torch.cat((labels_stack, labels), 0)
+        return preds_stack, labels_stack
 
-    def ensemble(self, loader, test_loader, type='basic', init_lr=0.01, log_step=100):
+    def ensemble(self, loader, test_loader, type='basic', init_lr=0.01, log_step=100, steps=20):
         n_class = len(self.cfg.num_classes)
         w = np.random.rand(n_class, len(self.id_obs))
         iden_matrix = np.diag(np.ones(n_class))
@@ -373,18 +388,16 @@ class ChexPert_model():
             if type=='basic':
                 grad = (preds.T.dot(preds) + 0.1*iden_matrix).dot(w) - preds.T.dot(labels)
             elif type=='b_constraint':
-                grad = (preds.T.dot(preds) + 0.1*iden_matrix + 2*self.M.T.dot(self.M)).dot(w) + - preds.T.dot(labels)
+                grad = (preds.T.dot(preds) + 0.1*iden_matrix + 3*self.M.T.dot(self.M)).dot(w) + - preds.T.dot(labels)
             else:
                 raise Exception("Not support this type!!!")
             w -= lr*grad
             if (i+1)%step == 0:
-                print(w)
-                # lr = decayed_learning_rate(i+1, ilr, decay_steps=step)
-                # print(lr)
+                # print(w)
                 end = time.time()
                 print('iter {:d} time takes: {:.3f}s'.format(i+1, end-start))
                 start = time.time()
-                if (i+1)//step==20:
+                if (i+1)//step==steps:
                     break
         self.ensemble_weights = torch.from_numpy(w).float().to(self.device)
         print('Done Essemble!!!')
