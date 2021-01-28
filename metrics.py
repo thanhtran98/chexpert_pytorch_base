@@ -42,12 +42,10 @@ def get_loss(output, target, index, device, cfg):
             loss = F.binary_cross_entropy_with_logits(
                 output[index].view(-1), target, pos_weight=pos_weight[index])
 
-        label = torch.sigmoid(output[index].view(-1)).ge(0.5).float()
-        acc = (target == label).float().sum() / len(label)
     else:
         raise Exception('Unknown criterion : {}'.format(cfg.criterion))
 
-    return (loss, acc)
+    return loss
 
 class OA_loss(nn.Module):
     def __init__(self, device, cfg):

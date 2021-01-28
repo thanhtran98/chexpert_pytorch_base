@@ -1,8 +1,10 @@
 import torch.nn as nn
+import torch
 import torch.nn.functional as F
+from model.global_pool import GlobalPool
 
 class ResNeSt(nn.Module):
-    def __init__(self, pre_model, cfg):
+    def __init__(self, pre_model, cfg, modify_gp=False):
         super(ResNeSt, self).__init__()
         self.cfg = cfg
         self.conv1 = pre_model.conv1
@@ -13,16 +15,26 @@ class ResNeSt(nn.Module):
         self.layer2 = pre_model.layer2
         self.layer3 = pre_model.layer3
         self.layer4 = pre_model.layer4
-        self.avgpool = pre_model.avgpool
+        self.modify_gp = modify_gp
+        if self.modify_gp:
+            self.avgpool = GlobalPool(self.cfg)
+        else:
+            self.avgpool = pre_model.avgpool
         self.num_features = pre_model.fc.in_features
         self._init_classifier()
 
     def _init_classifier(self):
         for index, num_class in enumerate(self.cfg.num_classes):
-            setattr(self,"fc_"+str(index),
-                    nn.Linear(in_features=self.num_features,
-                              out_features=num_class, bias=True)
+            if self.modify_gp:
+                setattr(self,"fc_"+str(index),
+                    nn.Conv2d(self.num_features,num_class,kernel_size=1,
+                              stride=1,padding=0,bias=True)
                     )
+            else:
+                setattr(self,"fc_"+str(index),
+                        nn.Linear(in_features=self.num_features,
+                                out_features=num_class, bias=True)
+                        )
 
             classifier = getattr(self, "fc_" + str(index))
             if isinstance(classifier, nn.Conv2d):
@@ -49,21 +61,115 @@ class ResNeSt(nn.Module):
 
             classifier = getattr(self, "fc_" + str(index))
             
-            feat = self.avgpool(feat_map)
+            if self.modify_gp:
+                logit_map = None
+                if not (self.cfg.global_pool == 'AVG_MAX' or
+                    self.cfg.global_pool == 'AVG_MAX_LSE'):
+                    logit_map = classifier(feat_map)
+                    logit_maps.append(logit_map.squeeze())
+                feat = self.avgpool(feat_map, logit_map)
 
-            feat = F.dropout(feat, p=self.cfg.fc_drop, training=self.training)
+                if self.cfg.fc_bn:
+                    bn = getattr(self, "bn_" + str(index))
+                    feat = bn(feat)
+                feat = F.dropout(feat, p=self.cfg.fc_drop, training=self.training)
+                # (N, num_class, 1, 1)
 
-            # (N, num_class, 1, 1)
-            logit = classifier(feat)
+                logit = classifier(feat)
+                logit = logit.squeeze(-1).squeeze(-1)
+            
+            else:
+                feat = self.avgpool(feat_map)
 
-            # (N, num_class)
+                feat = F.dropout(feat, p=self.cfg.fc_drop, training=self.training)
+
+                # (N, num_class, 1, 1)
+                logit = classifier(feat)
+
+                # (N, num_class)
+            
             logits.append(logit)
 
         return logits
 
+class Dense(nn.Module):
+    def __init__(self, pre_model, cfg, modify_gp=False):
+        super(Dense, self).__init__()
+        self.cfg = cfg
+        self.features = pre_model.features
+        self.modify_gp = modify_gp
+        if self.modify_gp:
+            self.avgpool = GlobalPool(self.cfg)
+        else:
+            self.avgpool = F.adaptive_avg_pool2d
+        self.num_features = pre_model.classifier.in_features
+        self._init_classifier()
+
+    def _init_classifier(self):
+        for index, num_class in enumerate(self.cfg.num_classes):
+            if self.modify_gp:
+                setattr(self,"fc_"+str(index),
+                    nn.Conv2d(self.num_features,num_class,kernel_size=1,
+                              stride=1,padding=0,bias=True)
+                    )
+            else:
+                setattr(self,"fc_"+str(index),
+                        nn.Linear(in_features=self.num_features,
+                                out_features=num_class, bias=True)
+                        )
+
+            classifier = getattr(self, "fc_" + str(index))
+            if isinstance(classifier, nn.Conv2d):
+                classifier.weight.data.normal_(0, 0.01)
+                classifier.bias.data.zero_()
+    
+    def forward(self, x):
+        # (N, C, H, W)
+        x = self.features(x)
+        feat_map = F.relu(x, inplace=True)
+        # [(N, 1), (N,1),...]
+        logits = list()
+        # [(N, H, W), (N, H, W),...]
+        logit_maps = list()
+        for index, num_class in enumerate(self.cfg.num_classes):
+            if self.cfg.attention_map != "None":
+                feat_map = self.attention_map(feat_map)
+
+            classifier = getattr(self, "fc_" + str(index))
+            
+            if self.modify_gp:
+                logit_map = None
+                if not (self.cfg.global_pool == 'AVG_MAX' or
+                    self.cfg.global_pool == 'AVG_MAX_LSE'):
+                    logit_map = classifier(feat_map)
+                    logit_maps.append(logit_map.squeeze())
+                feat = self.avgpool(feat_map, logit_map)
+
+                if self.cfg.fc_bn:
+                    bn = getattr(self, "bn_" + str(index))
+                    feat = bn(feat)
+                feat = F.dropout(feat, p=self.cfg.fc_drop, training=self.training)
+                # (N, num_class, 1, 1)
+
+                logit = classifier(feat)
+                logit = logit.squeeze(-1).squeeze(-1)
+            
+            else:
+                feat = self.avgpool(feat_map, (1, 1))
+                feat = torch.flatten(feat, 1)
+                # feat = F.dropout(feat, p=self.cfg.fc_drop, training=self.training)
+
+                # (N, num_class, 1, 1)
+                logit = classifier(feat)
+
+                # (N, num_class)
+            
+            logits.append(logit)
+
+        return logits
 
 class Efficient(nn.Module):
-    def __init__(self, pre_model, cfg):
+    def __init__(self, pre_model, cfg, modify_gp=False):
         super(Efficient, self).__init__()
         self.cfg = cfg
         self._conv_stem = pre_model._conv_stem
@@ -71,7 +177,11 @@ class Efficient(nn.Module):
         self._blocks = pre_model._blocks
         self._conv_head = pre_model._conv_head
         self._bn1 = pre_model._bn1
-        self._avg_pooling = pre_model._avg_pooling
+        self.modify_gp = modify_gp
+        if self.modify_gp:
+            self._avg_pooling = GlobalPool(self.cfg)
+        else:
+            self._avg_pooling = pre_model._avg_pooling
         self._dropout = pre_model._dropout
         self.num_features = pre_model._fc.in_features
         self._init_classifier()
@@ -81,8 +191,6 @@ class Efficient(nn.Module):
             setattr(self,"fc_"+str(index),
                     nn.Conv2d(self.num_features,num_class,kernel_size=1,
                               stride=1,padding=0,bias=True)
-                    # nn.Linear(in_features=self.num_features,
-                    #           out_features=num_class, bias=True)
                     )
 
             classifier = getattr(self, "fc_" + str(index))
@@ -108,17 +216,36 @@ class Efficient(nn.Module):
 
             classifier = getattr(self, "fc_" + str(index))
 
-            # (N, C, 1, 1)
-            feat = self._avg_pooling(feat_map)
-            feat = self._dropout(feat)
+            if self.modify_gp:
+                logit_map = None
+                if not (self.cfg.global_pool == 'AVG_MAX' or
+                    self.cfg.global_pool == 'AVG_MAX_LSE'):
+                    logit_map = classifier(feat_map)
+                    logit_maps.append(logit_map.squeeze())
+                feat = self._avg_pooling(feat_map, logit_map)
 
-            # (N, num_class, 1, 1)
-            # feat = feat.squeeze(-1).squeeze(-1)
-            logit = classifier(feat)
-            # logit = self._swish(logit)
+                if self.cfg.fc_bn:
+                    bn = getattr(self, "bn_" + str(index))
+                    feat = bn(feat)
+                feat = F.dropout(feat, p=self.cfg.fc_drop, training=self.training)
+                # (N, num_class, 1, 1)
 
-            # (N, num_class)
-            logit = logit.squeeze(-1).squeeze(-1)
+                logit = classifier(feat)
+                logit = logit.squeeze(-1).squeeze(-1)
+
+            else:
+                # (N, C, 1, 1)
+                feat = self._avg_pooling(feat_map)
+                feat = self._dropout(feat)
+
+                # (N, num_class, 1, 1)
+                # feat = feat.squeeze(-1).squeeze(-1)
+                logit = classifier(feat)
+                # logit = self._swish(logit)
+
+                # (N, num_class)
+                logit = logit.squeeze(-1).squeeze(-1)
+
             logits.append(logit)
 
         return logits
@@ -137,7 +264,7 @@ class ResNeSt_parallel(nn.Module):
         self.avgpool = pre_model.avgpool
         self.num_features = pre_model.fc.in_features
         self.fc = nn.Linear(in_features=self.num_features,out_features=num_classes, bias=True)
-    
+
     def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
@@ -150,6 +277,21 @@ class ResNeSt_parallel(nn.Module):
         x = self.avgpool(x)
         x = self.fc(x)
         return x
+
+class Dense_parallel(nn.Module):
+    def __init__(self, pre_model, num_classes):
+        super(Dense_parallel, self).__init__()
+        self.features = pre_model.features
+        self.num_features = pre_model.classifier.in_features
+        self.fc = nn.Linear(in_features=self.num_features,out_features=num_classes, bias=True)
+
+    def forward(self, x):
+        x = self.features(x)
+        out = F.relu(x, inplace=True)
+        out = F.adaptive_avg_pool2d(out, (1, 1))
+        out = torch.flatten(out, 1)
+        out = self.fc(out)
+        return out
 
 class Efficient_parallel(nn.Module):
     def __init__(self, pre_model, num_classes):

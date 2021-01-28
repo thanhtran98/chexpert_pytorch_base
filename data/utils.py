@@ -66,3 +66,22 @@ def transform(image, cfg):
     image = image.transpose((2, 0, 1))
 
     return image
+
+def user_transform(image, cfg):
+    assert image.ndim == 2, "image must be gray image"
+
+    image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+
+    image = cv2.resize(image, (256, 256))
+    # augmentation for train or co_train
+
+    # normalization
+    image = image.astype(np.float32) - cfg.pixel_mean
+    # vgg and resnet do not use pixel_std, densenet and inception use.
+    if cfg.pixel_std:
+        image /= cfg.pixel_std
+    # normal image tensor :  H x W x C
+    # torch image tensor :   C X H X W
+    image = image.transpose((2, 0, 1))
+
+    return image
