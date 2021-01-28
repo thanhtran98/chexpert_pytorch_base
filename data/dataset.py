@@ -1,3 +1,4 @@
+import random
 import numpy as np
 from torch.utils.data import Dataset
 import cv2
@@ -6,11 +7,18 @@ from PIL import Image
 from data.imgaug import GetTransforms
 from data.utils import transform, user_transform
 np.random.seed(0)
-import random
 
 
 class ImageDataset(Dataset):
     def __init__(self, label_path, cfg, mode='train'):
+        """Image generator
+
+        Args:
+            label_path (str): path to .csv file contains img paths and class labels
+            cfg (str): path to .json file contains model configuration
+            mode (str, optional): define which mode you are using. Defaults to 'train'.
+            conditional_training (bool, optional): choosing train with conditional training or not. Defaults to False.
+        """
         self.cfg = cfg
         self._label_header = None
         self._image_paths = []
@@ -80,11 +88,8 @@ class ImageDataset(Dataset):
 
 
 class ImageDataset_full(Dataset):
-    leaves_id = [2,4,5,6,7,8]
-    parents_id = [0,1,3,9,10,11,12,13]
-    observes_id = [2,5,6,8,10]
     def __init__(self, label_path, cfg, mode='train', smooth_mode='pos', conditional_training=False):
-        """Image generator
+        """Image generator for conditional training and finetuning parent samples
 
         Args:
             label_path (str): path to .csv file contains img paths and class labels
@@ -98,12 +103,10 @@ class ImageDataset_full(Dataset):
         self._image_paths = []
         self._labels = []
         self._mode = mode
-        if smooth_mode=='pos':
+        if smooth_mode == 'pos':
             self.smooth_range = (0.55, 0.85)
-        elif smooth_mode=='neg':
+        elif smooth_mode == 'neg':
             self.smooth_range = (0, 0.3)
-        # self.dict = [{'1.0': '1', '': '0', '0.0': '0', '-1.0': '0'},
-        #              {'1.0': '1', '': '0', '0.0': '0', '-1.0': '1'}, ]
         self.dict = {'1.0': 1.0, '': 0.0, '0.0': 0.0, '-1.0': -1.0}
         with open(label_path) as f:
             header = f.readline().strip('\n').split(',')
@@ -113,9 +116,13 @@ class ImageDataset_full(Dataset):
                 fields = line.strip('\n').split(',')
                 image_path = fields[0]
 
+                # check positive parent label
+                positive_parent = ((smooth_mode == 'pos') and (self.dict.get(fields[5:][1]) != 0.0 or self.dict.get(fields[5:][3]) != 0.0)) \
+                    or ((smooth_mode == 'neg') and (self.dict.get(fields[5:][1]) > 0.0 or self.dict.get(fields[5:][3]) > 0.0))
+
                 # If not using conditional training => Load all images
                 # Otherwise, only load images with parent label are positive or uncertain
-                if mode=='dev' or (not conditional_training or (self.dict.get(fields[5:][1]) != 0.0 or self.dict.get(fields[5:][3]) != 0.0)):
+                if mode == 'dev' or (not conditional_training or positive_parent):
                     for index, value in enumerate(fields[5:]):
                         labels.append(self.dict.get(value))
                     self._image_paths.append(image_path)
@@ -133,7 +140,8 @@ class ImageDataset_full(Dataset):
             image = GetTransforms(image, type=self.cfg.use_transforms_type)
         image = np.array(image)
         image = user_transform(image, self.cfg)
-        labels = [random.uniform(self.smooth_range[0], self.smooth_range[1]) if x==-1.0 else x for x in self._labels[idx]]
+        labels = [random.uniform(self.smooth_range[0], self.smooth_range[1])
+                  if x == -1.0 else x for x in self._labels[idx]]
         labels = np.array(labels).astype(np.float32)
 
         path = self._image_paths[idx]
