@@ -1,80 +1,19 @@
+from torch import tensor
 import torch.nn as nn
 import numpy as np
-import time, cv2, os, shutil, tqdm, pickle, torch
+import time
+import cv2
+import os
+import shutil
+import tqdm
+import pickle
+import torch
 from data.utils import transform
-from model.models import ResNeSt_parallel, Efficient_parallel, Efficient, ResNeSt, Dense, Dense_parallel
+from model.utils import get_model, get_str, tensor2numpy
 from model.classifier import Classifier
-from resnest.torch import resnest50, resnest101, resnest200, resnest269
-from efficientnet_pytorch import EfficientNet
-from torchvision.models import densenet121, densenet161, densenet169, densenet201
 
 
-def build_parallel_model(model_name, id, cfg=None, pretrained=False, split_output=False, modify_gp=False):
-    if model_name == 'resnest':
-        childs_cut = 9
-        if id == '50':
-            pre_name = resnest50
-        elif id == '101':
-            pre_name = resnest101
-        elif id == '200':
-            pre_name = resnest200
-        else:
-            pre_name = resnest269
-        pre_model = pre_name(pretrained=pretrained)
-        for param in pre_model.parameters():
-            param.requires_grad = True
-        if split_output:
-            model = ResNeSt(pre_model, cfg, modify_gp)
-        else:
-            model = ResNeSt_parallel(pre_model, 5)
-    elif model_name == 'efficient' or model_name == 'efficientnet':
-        childs_cut = 6
-        pre_name = 'efficientnet-'+id
-        if pretrained:
-            pre_model = EfficientNet.from_pretrained(pre_name)
-        else:
-            pre_model = EfficientNet.from_name(pre_name)
-        for param in pre_model.parameters():
-            param.requires_grad = True
-        if split_output:
-            model = Efficient(pre_model, cfg, modify_gp)
-        else:
-            model = Efficient_parallel(pre_model, 5)
-    elif model_name == 'dense' or model_name == 'densenet':
-        childs_cut = 2
-        if id == '121':
-            pre_name = densenet121
-        elif id == '161':
-            pre_name = densenet161
-        elif id == '169':
-            pre_name = densenet169
-        else:
-            pre_name = densenet201
-        pre_model = pre_name(pretrained=pretrained)
-        for param in pre_model.parameters():
-            param.requires_grad = True
-        if split_output:
-            model = Dense(pre_model, cfg, modify_gp)
-        else:
-            model = Dense_parallel(pre_model, 5)
-    else:
-        raise Exception("Not support this model!!!!")
-    return model, childs_cut
-
-
-def get_str(metrics, mode, s):
-    for key in list(metrics.keys()):
-        if key == 'loss':
-            s += "{}_{} {:.3f} - ".format(mode, key, metrics[key])
-        else:
-            metric_str = ' '.join(
-                map(lambda x: '{:.5f}'.format(x), metrics[key]))
-            s += "{}_{} {} - ".format(mode, key, metric_str)
-    s = s[:-2] + '\n'
-    return s
-
-
-class ChexPert_model():
+class CheXpert_model():
     disease_classes = [
         'Cardiomegaly',
         'Edema',
@@ -92,8 +31,23 @@ class ChexPert_model():
                   [0, 0, 0, 1, 0, 0, 0, -2, 0, 0, 0, 0, 0, 0],
                   [0, 0, 0, 1, 0, 0, 0, 0, -2, 0, 0, 0, 0, 0]])
 
-    def __init__(self, cfg, optimizer, origin=True, split_output=False, modify_gp=False, loss_func=None,
+    def __init__(self, cfg, optimizer, loss_func, split_output=False, modify_gp=False,
                  model_name='resnest', id='50', lr=3e-4, metrics=None, pretrained=True, full_classes=False):
+        """CheXpert class contains all functions used for training and testing our models
+
+        Args:
+            cfg (str): path to .json file contains model configuration.
+            optimizer (torch.optim): optimizer of the model.
+            loss_func (torch.nn.Module): loss function of the model.
+            split_output (bool, optional): split the head after the model backbone into branches. Defaults to False.
+            modify_gp (bool, optional): use another gobal pooling (PCAM/LSE/EXP/AVG). Defaults to False.
+            model_name (str, optional): name of the model (resnest/efficientnet/densenet). Defaults to 'resnest'.
+            id (str, optional): model version (eg: 50 - resnest50, b4 - efficientnet-b4). Defaults to '50'.
+            lr ([type], optional): initial value of learning rate. Defaults to 3e-4.
+            metrics ([type], optional): metrics use to evaluate model performance. Defaults to None.
+            pretrained (bool, optional): use ImageNet pretrained weights. Defaults to True.
+            full_classes (bool, optional): training with full 14 classes of observations. Defaults to False.
+        """
         self.model_name = model_name
         self.id = id
         self.cfg = cfg
@@ -102,18 +56,10 @@ class ChexPert_model():
             self.cfg.num_classes = 14*[1]
         self.split_output = split_output
         self.modify_gp = modify_gp
-        if origin:
-            self.split_output = True
-            self.modify_gp = True
-            self.model = Classifier(self.cfg)
-        else:
-            self.model, self.childs_cut = build_parallel_model(
-                self.model_name, self.id, self.cfg, pretrained, self.split_output, self.modify_gp)
+        self.model, self.childs_cut = get_model(
+            self.model_name, self.id, self.cfg, pretrained, self.split_output, self.modify_gp)
         self.device = torch.device(
             "cuda:0" if torch.cuda.is_available() else "cpu")
-        # if self.split_output:
-        #     self.loss_func = OA_loss(self.device, self.cfg)
-        # else:
         self.loss_func = loss_func
         if metrics is not None:
             self.metrics = metrics
@@ -126,7 +72,9 @@ class ChexPert_model():
             "cuda:0" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
-    def freeze_head(self):
+    def freeze_backbone(self):
+        """Freeze model backbone
+        """
         ct = 0
         for child in self.model.children():
             ct += 1
@@ -135,15 +83,27 @@ class ChexPert_model():
                     param.requires_grad = False
 
     def load_ckp(self, ckp_path):
+        """Load checkpoint
+
+        Args:
+            ckp_path (str): path to checkpoint
+
+        Returns:
+            int, int: current epoch, current iteration
+        """
         ckp = torch.load(ckp_path, map_location=self.device)
         self.model.load_state_dict(ckp['state_dict'])
 
-    def load_resume_ckp(self, ckp_path):
-        ckp = torch.load(ckp_path, map_location=self.device)
-        self.model.load_state_dict(ckp['state_dict'])
         return ckp['epoch'], ckp['iter']
 
     def save_ckp(self, ckp_path, epoch, i):
+        """Save checkpoint
+
+        Args:
+            ckp_path (str): path to saved checkpoint
+            epoch (int): current epoch
+            i (int): current iteration
+        """
         if os.path.exists(os.path.dirname(ckp_path)):
             torch.save(
                 {'epoch': epoch+1,
@@ -155,7 +115,16 @@ class ChexPert_model():
             print("Save path not exist!!!")
 
     def predict(self, image, mix_precision=False, conditional_training=False):
+        """Run prediction
 
+        Args:
+            image (torch.Tensor): images to predict. Shape (batch size, C, H, W)
+            mix_precision (bool, optional): use mix percision. Defaults to False.
+            conditional_training (bool, optional): use conditional training. Defaults to False.
+
+        Returns:
+            torch.Tensor: model prediction
+        """
         torch.set_grad_enabled(False)
         self.model.eval()
         with torch.no_grad() as tng:
@@ -176,18 +145,25 @@ class ChexPert_model():
         return preds
 
     def predict_from_file(self, image_file):
+        """Run prediction from image path
 
+        Args:
+            image_file (str): image path
+
+        Returns:
+            numpy: model prediction in numpy array type
+        """
         image_gray = cv2.imread(image_file, 0)
         image = transform(image_gray, self.cfg)
         image = torch.from_numpy(image)
         image = image.unsqueeze(0)
 
-        return nn.Sigmoid()(self.predict(image)).cpu().numpy()
+        return tensor2numpy(nn.Sigmoid()(self.predict(image)))
 
     def predict_loader(self, loader, mix_precision=False, ensemble=False, conditional_training=False):
 
-        preds_stack=None
-        labels_stack=None
+        preds_stack = None
+        labels_stack = None
 
         for i, data in enumerate(loader):
             imgs, labels = data[0].to(self.device), data[1].to(self.device)
@@ -218,12 +194,12 @@ class ChexPert_model():
         if os.path.exists(ckp_dir) != True:
             os.mkdir(ckp_dir)
         if resume:
-            epoch_resume, iter_resume = self.load_resume_ckp(
+            epoch_resume, iter_resume = self.load_ckp(
                 os.path.join(ckp_dir, 'latest.ckpt'))
         else:
             epoch_resume = 1
             iter_resume = 0
-        scaler=None
+        scaler = None
         if mix_precision:
             print('Train with mix precision!')
             scaler = torch.cuda.amp.GradScaler()
@@ -264,8 +240,8 @@ class ChexPert_model():
                     if key == 'loss':
                         running_metrics[key] += running_loss
                     else:
-                        running_metrics[key] += self.metrics[key](
-                            preds, labels).cpu().numpy()*batch_weights[i]
+                        running_metrics[key] += tensor2numpy(self.metrics[key](
+                            preds, labels))*batch_weights[i]
                 self.optimizer.zero_grad()
                 if mix_precision:
                     scaler.scale(loss).backward()
@@ -369,8 +345,8 @@ class ChexPert_model():
             if key == 'loss':
                 running_metrics[key] = running_loss
             else:
-                running_metrics[key] = self.metrics[key](
-                    preds_stack, labels_stack).cpu().numpy()
+                running_metrics[key] = tensor2numpy(self.metrics[key](
+                    preds_stack, labels_stack))
         torch.set_grad_enabled(True)
         self.model.train()
         return running_metrics
@@ -409,13 +385,14 @@ class ChexPert_model():
         return metrics
 
     def save_FAEL_weight(self, path):
-        with open(path,'wb') as f:
-            pickle.dump(self.ensemble_weights.float().cpu().numpy(), f)
-    
+        with open(path, 'wb') as f:
+            pickle.dump(tensor2numpy(self.ensemble_weights.float()), f)
+
     def load_FAEL_weight(self, path, mix_precision):
-        with open(path,'rb') as f:
+        with open(path, 'rb') as f:
             w = pickle.load(f)
         if mix_precision:
-            self.ensemble_weights = torch.from_numpy(w).type(torch.HalfTensor).to(self.device)
+            self.ensemble_weights = torch.from_numpy(
+                w).type(torch.HalfTensor).to(self.device)
         else:
             self.ensemble_weights = torch.from_numpy(w).float().to(self.device)

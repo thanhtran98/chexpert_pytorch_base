@@ -1,5 +1,9 @@
 import torch.nn as nn
 from torch.optim import SGD, Adadelta, Adagrad, Adam, RMSprop
+from model.models import ResNeSt_parallel, Efficient_parallel, Efficient, ResNeSt, Dense, Dense_parallel
+from resnest.torch import resnest50, resnest101, resnest200, resnest269
+from efficientnet_pytorch import EfficientNet
+from torchvision.models import densenet121, densenet161, densenet169, densenet201
 
 
 def get_norm(norm_type, num_features, num_groups=32, eps=1e-5):
@@ -30,6 +34,68 @@ def get_optimizer(params, cfg):
     else:
         raise Exception('Unknown optimizer : {}'.format(cfg.optimizer))
 
+def get_model(model_name, id, cfg=None, pretrained=False, split_output=False, modify_gp=False):
+    if model_name == 'resnest':
+        childs_cut = 9
+        if id == '50':
+            pre_name = resnest50
+        elif id == '101':
+            pre_name = resnest101
+        elif id == '200':
+            pre_name = resnest200
+        else:
+            pre_name = resnest269
+        pre_model = pre_name(pretrained=pretrained)
+        for param in pre_model.parameters():
+            param.requires_grad = True
+        if split_output:
+            model = ResNeSt(pre_model, cfg, modify_gp)
+        else:
+            model = ResNeSt_parallel(pre_model, 5)
+    elif model_name == 'efficient' or model_name == 'efficientnet':
+        childs_cut = 6
+        pre_name = 'efficientnet-'+id
+        if pretrained:
+            pre_model = EfficientNet.from_pretrained(pre_name)
+        else:
+            pre_model = EfficientNet.from_name(pre_name)
+        for param in pre_model.parameters():
+            param.requires_grad = True
+        if split_output:
+            model = Efficient(pre_model, cfg, modify_gp)
+        else:
+            model = Efficient_parallel(pre_model, 5)
+    elif model_name == 'dense' or model_name == 'densenet':
+        childs_cut = 2
+        if id == '121':
+            pre_name = densenet121
+        elif id == '161':
+            pre_name = densenet161
+        elif id == '169':
+            pre_name = densenet169
+        else:
+            pre_name = densenet201
+        pre_model = pre_name(pretrained=pretrained)
+        for param in pre_model.parameters():
+            param.requires_grad = True
+        if split_output:
+            model = Dense(pre_model, cfg, modify_gp)
+        else:
+            model = Dense_parallel(pre_model, 5)
+    else:
+        raise Exception("Not support this model!!!!")
+    return model, childs_cut
+
+def get_str(metrics, mode, s):
+    for key in list(metrics.keys()):
+        if key == 'loss':
+            s += "{}_{} {:.3f} - ".format(mode, key, metrics[key])
+        else:
+            metric_str = ' '.join(
+                map(lambda x: '{:.5f}'.format(x), metrics[key]))
+            s += "{}_{} {} - ".format(mode, key, metric_str)
+    s = s[:-2] + '\n'
+    return s
 
 def tensor2numpy(input_tensor):
     # device cuda Tensor to host numpy
