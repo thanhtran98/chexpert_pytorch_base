@@ -93,12 +93,11 @@ class CheXpert_model():
         else:
             print("Save path not exist!!!")
 
-    def predict(self, image, mix_precision=False):
+    def predict(self, image):
         """Run prediction
 
         Args:
             image (torch.Tensor): images to predict. Shape (batch size, C, H, W)
-            mix_precision (bool, optional): use mix percision for prediction. Defaults to False.
 
         Returns:
             torch.Tensor: model prediction
@@ -106,7 +105,7 @@ class CheXpert_model():
         torch.set_grad_enabled(False)
         self.model.eval()
         with torch.no_grad() as tng:
-            if mix_precision:
+            if self.cfg.mix_precision:
                 with torch.cuda.amp.autocast():
                     preds = self.model(image)
                     if self.cfg.split_output:
@@ -138,12 +137,11 @@ class CheXpert_model():
 
         return tensor2numpy(nn.Sigmoid()(self.predict(image)))
 
-    def predict_loader(self, loader, mix_precision=False, ensemble=False):
+    def predict_loader(self, loader, ensemble=False):
         """Run prediction on a given dataloader.
 
         Args:
             loader (torch.utils.data.Dataloader): a dataloader
-            mix_precision (bool, optional): use mix precision for prediction. Defaults to False.
             ensemble (bool, optional): use FAEL for prediction. Defaults to False.
 
         Returns:
@@ -152,9 +150,9 @@ class CheXpert_model():
         preds_stack = None
         labels_stack = None
 
-        for i, data in enumerate(loader):
+        for i, data in enumerate(tqdm.tqdm(loader)):
             imgs, labels = data[0].to(self.device), data[1].to(self.device)
-            preds = self.predict(imgs, mix_precision, self.cfg.conditional_training)
+            preds = self.predict(imgs, self.cfg.mix_precision, self.cfg.conditional_training)
             if self.cfg.conditional_training:
                 labels = labels[:, self.id_leaf]
             preds = nn.Sigmoid()(preds)
@@ -207,17 +205,33 @@ class CheXpert_model():
             start = time.time()
             running_metrics = dict.fromkeys(self.metrics.keys(), 0.0)
             running_metrics.pop(eval_metric, None)
-            ova_len = train_loader.dataset._num_image
             n_iter = len(train_loader)
             torch.set_grad_enabled(True)
             self.model.train()
             batch_weights = (1/iter_log)*np.ones(n_iter)
+            step_per_epoch = n_iter // iter_log
             if n_iter % iter_log:
+                step_per_epoch += 1
                 batch_weights[-(n_iter % iter_log):] = 1 / (n_iter % iter_log)
-            for i, data in tqdm.tqdm(enumerate(train_loader)):
-                imgs, labels = data[0].to(self.device), data[1].to(self.device)
-                if self.cfg.mix_precision:
-                    with torch.cuda.amp.autocast():
+                iter_per_step = iter_log*np.ones(step_per_epoch, dtype = np.int16)
+                iter_per_step[-1] = n_iter%iter_log
+            else:
+                iter_per_step = iter_log*np.ones(step_per_epoch, dtype = np.int16)
+            i = 0
+            for step in range(step_per_epoch):
+                for iteration in tqdm.tqdm(range(iter_per_step[step])):
+                    data = next(iter(train_loader))
+                    imgs, labels = data[0].to(self.device), data[1].to(self.device)
+                    if self.cfg.mix_precision:
+                        with torch.cuda.amp.autocast():
+                            preds = self.model(imgs)
+                            if self.cfg.split_output:
+                                preds = torch.cat([aa for aa in preds], dim=-1)
+                            if self.cfg.conditional_training:
+                                preds = preds[:, self.id_leaf]
+                                labels = labels[:, self.id_leaf]
+                            loss = self.metrics['loss'](preds, labels)
+                    else:
                         preds = self.model(imgs)
                         if self.cfg.split_output:
                             preds = torch.cat([aa for aa in preds], dim=-1)
@@ -225,61 +239,54 @@ class CheXpert_model():
                             preds = preds[:, self.id_leaf]
                             labels = labels[:, self.id_leaf]
                         loss = self.metrics['loss'](preds, labels)
-                else:
-                    preds = self.model(imgs)
-                    if self.cfg.split_output:
-                        preds = torch.cat([aa for aa in preds], dim=-1)
-                    if self.cfg.conditional_training:
-                        preds = preds[:, self.id_leaf]
-                        labels = labels[:, self.id_leaf]
-                    loss = self.metrics['loss'](preds, labels)
-                preds = nn.Sigmoid()(preds)
-                running_loss = loss.item()*batch_weights[i]
-                for key in list(running_metrics.keys()):
-                    if key == 'loss':
-                        running_metrics[key] += running_loss
+                    preds = nn.Sigmoid()(preds)
+                    running_loss = loss.item()*batch_weights[i]
+                    for key in list(running_metrics.keys()):
+                        if key == 'loss':
+                            running_metrics[key] += running_loss
+                        else:
+                            running_metrics[key] += tensor2numpy(self.metrics[key](
+                                preds, labels))*batch_weights[i]
+                    self.optimizer.zero_grad()
+                    if self.cfg.mix_precision:
+                        scaler.scale(loss).backward()
+                        scaler.step(self.optimizer)
+                        scaler.update()
                     else:
-                        running_metrics[key] += tensor2numpy(self.metrics[key](
-                            preds, labels))*batch_weights[i]
-                self.optimizer.zero_grad()
-                if self.cfg.mix_precision:
-                    scaler.scale(loss).backward()
-                    scaler.step(self.optimizer)
-                    scaler.update()
+                        loss.backward()
+                        self.optimizer.step()
+                    i += 1
+                
+                s = "Epoch [{}/{}] Iter [{}/{}]:\n".format(
+                    epoch+1, epochs, i+1, n_iter)
+                s = get_str(running_metrics, 'train', s)
+                running_metrics_test = self.test(
+                    val_loader, False)
+                s = get_str(running_metrics_test, 'val', s)
+                if self.cfg.conditional_training or (not self.cfg.full_classes):
+                    metric_eval = running_metrics_test[eval_metric]
                 else:
-                    loss.backward()
-                    self.optimizer.step()
-                if (i+1) % iter_log == 0:
-                    s = "Epoch [{}/{}] Iter [{}/{}]:\n".format(
-                        epoch+1, epochs, i+1, n_iter)
-                    s = get_str(running_metrics, 'train', s)
-                    running_metrics_test = self.test(
-                        val_loader, False)
-                    s = get_str(running_metrics_test, 'val', s)
-                    if self.cfg.conditional_training or (not self.cfg.full_classes):
-                        metric_eval = running_metrics_test[eval_metric]
-                    else:
-                        metric_eval = running_metrics_test[eval_metric][self.id_obs]
-                    s = s[:-1] + "- mean_"+eval_metric + \
-                        " {:.3f}".format(metric_eval.mean())
-                    self.save_ckp(os.path.join(
-                        ckp_dir, 'latest.ckpt'), epoch, i)
-                    if writer is not None:
-                        for key in list(running_metrics.keys()):
-                            writer.add_scalars(
-                                key, {'train': running_metrics[key].mean()}, (epoch*n_iter)+(i+1))
-                    running_metrics = dict.fromkeys(
-                        self.metrics.keys(), 0.0)
-                    running_metrics.pop(eval_metric, None)
-                    end = time.time()
-                    s += " ({:.1f}s)".format(end-start)
-                    print(s)
-                    if metric_eval.mean() > best_metric:
-                        best_metric = metric_eval.mean()
-                        shutil.copyfile(os.path.join(ckp_dir, 'latest.ckpt'), os.path.join(
-                            ckp_dir, 'epoch'+str(epoch+1)+'_iter'+str(i+1)+'.ckpt'))
-                        print('new checkpoint saved!')
-                    start = time.time()
+                    metric_eval = running_metrics_test[eval_metric][self.id_obs]
+                s = s[:-1] + "- mean_"+eval_metric + \
+                    " {:.3f}".format(metric_eval.mean())
+                self.save_ckp(os.path.join(
+                    ckp_dir, 'latest.ckpt'), epoch, i)
+                if writer is not None:
+                    for key in list(running_metrics.keys()):
+                        writer.add_scalars(
+                            key, {'train': running_metrics[key].mean()}, (epoch*n_iter)+(i+1))
+                running_metrics = dict.fromkeys(
+                    self.metrics.keys(), 0.0)
+                running_metrics.pop(eval_metric, None)
+                end = time.time()
+                s += " ({:.1f}s)".format(end-start)
+                print(s)
+                if metric_eval.mean() > best_metric:
+                    best_metric = metric_eval.mean()
+                    shutil.copyfile(os.path.join(ckp_dir, 'latest.ckpt'), os.path.join(
+                        ckp_dir, 'epoch'+str(epoch+1)+'_iter'+str(i+1)+'.ckpt'))
+                    print('new checkpoint saved!')
+                start = time.time()
 
             s = "Epoch [{}/{}] Iter [{}/{}]:\n".format(
                 epoch+1, epochs, n_iter, n_iter)
@@ -315,7 +322,7 @@ class CheXpert_model():
         preds_stack = None
         labels_stack = None
         running_loss = None
-        for i, data in enumerate(loader):
+        for i, data in enumerate(tqdm.tqdm(loader)):
             imgs, labels = data[0].to(self.device), data[1].to(self.device)
             if self.cfg.mix_precision:
                 with torch.cuda.amp.autocast():
@@ -359,7 +366,7 @@ class CheXpert_model():
 
         return running_metrics
 
-    def FAEL(self, loader, val_loader, type='basic', init_lr=0.01, log_step=100, steps=20, lambda1=0.1, lambda2=2):
+    def FAEL(self, loader, val_loader, type='basic', init_lr=0.01, log_iter=100, steps=20, lambda1=0.1, lambda2=2):
         """Run fully associative ensemble learning (FAEL)
 
         Args:
@@ -379,12 +386,12 @@ class CheXpert_model():
         w = np.random.rand(n_class, len(self.id_obs))
         iden_matrix = np.diag(np.ones(n_class))
         lr = init_lr
-        step = log_step
         start = time.time()
-        for i, data in enumerate(loader):
+        for i, data in enumerate(tqdm.tqdm(loader, total=log_iter*steps)):
             imgs, labels = data[0].to(self.device), data[1]
             preds = self.predict(imgs)
-            labels = labels.numpy()
+            preds = tensor2numpy(preds)
+            labels = tensor2numpy(labels)
             labels = labels[:, self.id_obs]
             if type == 'basic':
                 grad = (preds.T.dot(preds) + lambda1*iden_matrix).dot(w) - \
@@ -395,14 +402,18 @@ class CheXpert_model():
             else:
                 raise Exception("Not support this type!!!")
             w -= lr*grad
-            if (i+1) % step == 0:
+            if (i+1) % log_iter == 0:
                 # print(w)
                 end = time.time()
                 print('iter {:d} time takes: {:.3f}s'.format(i+1, end-start))
                 start = time.time()
-                if (i+1)//step == steps:
+                if (i+1)//log_iter == steps:
                     break
-        self.ensemble_weights = torch.from_numpy(w).float().to(self.device)
+        if self.cfg.mix_precision:
+            self.ensemble_weights = torch.from_numpy(
+                w).type(torch.HalfTensor).to(self.device)
+        else:
+            self.ensemble_weights = torch.from_numpy(w).float().to(self.device)
         print('Done Essemble!!!')
         metrics = self.test(val_loader, ensemble=True)
 
@@ -417,7 +428,7 @@ class CheXpert_model():
         with open(path, 'wb') as f:
             pickle.dump(tensor2numpy(self.ensemble_weights.float()), f)
 
-    def load_FAEL_weight(self, path, mix_precision=False):
+    def load_FAEL_weight(self, path):
         """load FAEL weight
 
         Args:
@@ -426,7 +437,7 @@ class CheXpert_model():
         """
         with open(path, 'rb') as f:
             w = pickle.load(f)
-        if mix_precision:
+        if self.cfg.mix_precision:
             self.ensemble_weights = torch.from_numpy(
                 w).type(torch.HalfTensor).to(self.device)
         else:

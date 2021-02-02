@@ -6,18 +6,6 @@ from efficientnet_pytorch import EfficientNet
 from torchvision.models import densenet121, densenet161, densenet169, densenet201
 
 
-def get_norm(norm_type, num_features, num_groups=32, eps=1e-5):
-    if norm_type == 'BatchNorm':
-        return nn.BatchNorm2d(num_features, eps=eps)
-    elif norm_type == "GroupNorm":
-        return nn.GroupNorm(num_groups, num_features, eps=eps)
-    elif norm_type == "InstanceNorm":
-        return nn.InstanceNorm2d(num_features, eps=eps,
-                                 affine=True, track_running_stats=True)
-    else:
-        raise Exception('Unknown Norm Function : {}'.format(norm_type))
-
-
 def get_optimizer(params, cfg):
     if cfg.optimizer == 'SGD':
         return SGD(params, lr=cfg.lr, momentum=cfg.momentum,

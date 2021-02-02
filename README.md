@@ -1,5 +1,8 @@
 # Lung abnormalities classification from Chest X-rays
 
+<img src="vnopenai.png" width="100%" align="middle"/>
+
+
 ## What is Chexpert?
 CheXpert is a large dataset of chest X-rays and competition for automated chest x-ray interpretation, which features uncertainty labels and radiologist-labeled reference standard evaluation sets.
 ## Why Chexpert?
@@ -32,10 +35,10 @@ python test.py
 ```
 
 ### Contact
-* If you have any quesions, please post it on github issues or contact with us at [https://vnopenai.org/contact/](https://vnopenai.org/contact/)
+* If you have any quesions, please post it on github issues or contact us at [https://vnopenai.org/contact/](https://vnopenai.org/contact/)
 
 ### Reference
 * [https://stanfordmlgroup.github.io/competitions/chexpert/](https://stanfordmlgroup.github.io/competitions/chexpert/)
-* [https://github.com/jfhealthcare/Chexpert](https://github.com/jfhealthcare/Chexpert)
+* [https://dr.vnopenai.org/](https://dr.vnopenai.org/)
 * [https://arxiv.org/abs/1911.06475](https://arxiv.org/abs/1911.06475)
 * [https://www.researchgate.net/publication/316805811_Hierarchical_Multi-Label_Classification_using_Fully_Associative_Ensemble_Learning](https://www.researchgate.net/publication/316805811_Hierarchical_Multi-Label_Classification_using_Fully_Associative_Ensemble_Learning)
