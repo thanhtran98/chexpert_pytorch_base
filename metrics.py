@@ -48,10 +48,19 @@ def get_loss(output, target, index, device, cfg):
     return loss
 
 class OA_loss(nn.Module):
+
     def __init__(self, device, cfg):
+        """modify loss funtion
+
+        Args:
+            device (torch.device): device
+            cfg (dict): configuration file.
+        """
         super(OA_loss, self).__init__()
         self.device=device
         self.cfg=cfg
+
+
     def forward(self, pred, target):
         num_tasks = len(self.cfg.num_classes)
         loss_sum = 0.0
@@ -60,11 +69,21 @@ class OA_loss(nn.Module):
             loss_sum += loss_t*(1/num_tasks)
         return loss_sum
 
+
 class F1(nn.Module):
+
     def __init__(self, thresh=0.5, eps=1e-5):
+        """F1 score
+
+        Args:
+            thresh (float, optional): threshold value. Defaults to 0.5.
+            eps (float, optional): epsilon value to prevent zero division. Defaults to 1e-5.
+        """
         super(F1, self).__init__()
         self.thresh=thresh
         self.eps=eps
+
+
     def forward(self, pred, target):
         pred_thresh = (pred > self.thresh)*1.0
         tp = torch.sum((pred_thresh == target)*(target==1.0), dim=0)
@@ -76,9 +95,17 @@ class F1(nn.Module):
         return f1_score
 
 class ACC(nn.Module):
+
     def __init__(self, thresh=0.5):
+        """ACC score
+
+        Args:
+            thresh (float, optional): threshold value. Defaults to 0.5.
+        """
         super(ACC, self).__init__()
         self.thresh=thresh
+
+
     def forward(self, pred, target):
         pred_thresh = (pred > self.thresh)*1.0
         t = torch.sum(pred_thresh==target, dim=0)
@@ -86,6 +113,8 @@ class ACC(nn.Module):
 
 class AUC(nn.Module):
     def __init__(self):
+        """AUC score
+        """
         super(AUC, self).__init__()
     def forward(self, pred, target):
         p_n = pred.cpu().detach().numpy()
@@ -94,6 +123,6 @@ class AUC(nn.Module):
         auclist = []
         for i in range(n_classes):
             fpr, tpr, _ = roc_curve(t_n[:, i], p_n[:, i])
-            auclist.append(auc(fpr, tpr))         
+            auclist.append(auc(fpr, tpr))
         auc_score = torch.from_numpy(np.array(auclist))
         return auc_score

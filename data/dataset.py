@@ -15,9 +15,8 @@ class ImageDataset(Dataset):
 
         Args:
             label_path (str): path to .csv file contains img paths and class labels
-            cfg (str): path to .json file contains model configuration
+            cfg (str): configuration file.
             mode (str, optional): define which mode you are using. Defaults to 'train'.
-            conditional_training (bool, optional): choosing train with conditional training or not. Defaults to False.
         """
         self.cfg = cfg
         self._label_header = None
@@ -88,24 +87,22 @@ class ImageDataset(Dataset):
 
 
 class ImageDataset_full(Dataset):
-    def __init__(self, label_path, cfg, mode='train', smooth_mode='pos', conditional_training=False):
+    def __init__(self, label_path, cfg, mode='train'):
         """Image generator for conditional training and finetuning parent samples
 
         Args:
             label_path (str): path to .csv file contains img paths and class labels
-            cfg (str): path to .json file contains model configuration
+            cfg (str): configuration file.
             mode (str, optional): define which mode you are using. Defaults to 'train'.
-            smooth_mode (str, optional): smoothing label regularization. Defaults to 'pos'.
-            conditional_training (bool, optional): choosing train with conditional training or not. Defaults to False.
         """
         self.cfg = cfg
         self._label_header = None
         self._image_paths = []
         self._labels = []
         self._mode = mode
-        if smooth_mode == 'pos':
+        if self.cfg.smooth_mode == 'pos':
             self.smooth_range = (0.55, 0.85)
-        elif smooth_mode == 'neg':
+        elif self.cfg.smooth_mode == 'neg':
             self.smooth_range = (0, 0.3)
         self.dict = {'1.0': 1.0, '': 0.0, '0.0': 0.0, '-1.0': -1.0}
         with open(label_path) as f:
@@ -117,12 +114,12 @@ class ImageDataset_full(Dataset):
                 image_path = fields[0]
 
                 # check positive parent label
-                positive_parent = ((smooth_mode == 'pos') and (self.dict.get(fields[5:][1]) != 0.0 or self.dict.get(fields[5:][3]) != 0.0)) \
-                    or ((smooth_mode == 'neg') and (self.dict.get(fields[5:][1]) > 0.0 or self.dict.get(fields[5:][3]) > 0.0))
+                positive_parent = ((self.cfg.smooth_mode == 'pos') and (self.dict.get(fields[5:][1]) != 0.0 or self.dict.get(fields[5:][3]) != 0.0)) \
+                    or ((self.cfg.smooth_mode == 'neg') and (self.dict.get(fields[5:][1]) > 0.0 or self.dict.get(fields[5:][3]) > 0.0))
 
                 # If not using conditional training => Load all images
                 # Otherwise, only load images with parent label are positive or uncertain
-                if mode == 'dev' or (not conditional_training or positive_parent):
+                if mode == 'dev' or (not self.cfg.conditional_training or positive_parent):
                     for index, value in enumerate(fields[5:]):
                         labels.append(self.dict.get(value))
                     self._image_paths.append(image_path)
