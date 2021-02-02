@@ -34,52 +34,52 @@ def get_optimizer(params, cfg):
     else:
         raise Exception('Unknown optimizer : {}'.format(cfg.optimizer))
 
-def get_model(model_name, id, cfg=None, pretrained=False, split_output=False, modify_gp=False):
-    if model_name == 'resnest':
+def get_model(cfg):
+    if cfg.backbone == 'resnest':
         childs_cut = 9
-        if id == '50':
+        if cfg.id == '50':
             pre_name = resnest50
-        elif id == '101':
+        elif cfg.id == '101':
             pre_name = resnest101
-        elif id == '200':
+        elif cfg.id == '200':
             pre_name = resnest200
         else:
             pre_name = resnest269
-        pre_model = pre_name(pretrained=pretrained)
+        pre_model = pre_name(pretrained=cfg.pretrained)
         for param in pre_model.parameters():
             param.requires_grad = True
-        if split_output:
-            model = ResNeSt(pre_model, cfg, modify_gp)
+        if cfg.split_output:
+            model = ResNeSt(pre_model, cfg)
         else:
             model = ResNeSt_parallel(pre_model, 5)
-    elif model_name == 'efficient' or model_name == 'efficientnet':
+    elif cfg.backbone == 'efficient' or cfg.backbone == 'efficientnet':
         childs_cut = 6
-        pre_name = 'efficientnet-'+id
-        if pretrained:
+        pre_name = 'efficientnet-'+cfg.id
+        if cfg.pretrained:
             pre_model = EfficientNet.from_pretrained(pre_name)
         else:
             pre_model = EfficientNet.from_name(pre_name)
         for param in pre_model.parameters():
             param.requires_grad = True
-        if split_output:
-            model = Efficient(pre_model, cfg, modify_gp)
+        if cfg.split_output:
+            model = Efficient(pre_model, cfg)
         else:
             model = Efficient_parallel(pre_model, 5)
-    elif model_name == 'dense' or model_name == 'densenet':
+    elif cfg.backbone == 'dense' or cfg.backbone == 'densenet':
         childs_cut = 2
-        if id == '121':
+        if cfg.id == '121':
             pre_name = densenet121
-        elif id == '161':
+        elif cfg.id == '161':
             pre_name = densenet161
-        elif id == '169':
+        elif cfg.id == '169':
             pre_name = densenet169
         else:
             pre_name = densenet201
-        pre_model = pre_name(pretrained=pretrained)
+        pre_model = pre_name(pretrained=cfg.pretrained)
         for param in pre_model.parameters():
             param.requires_grad = True
-        if split_output:
-            model = Dense(pre_model, cfg, modify_gp)
+        if cfg.split_output:
+            model = Dense(pre_model, cfg)
         else:
             model = Dense_parallel(pre_model, 5)
     else:
