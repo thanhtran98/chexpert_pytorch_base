@@ -4,18 +4,13 @@ os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 from data.dataset import ImageDataset, ImageDataset_full
 from easydict import EasyDict as edict
 from torch.utils.data import DataLoader
-import json, os, shutil, torch
-import torch.nn as nn
-from train import ChexPert_model
+import json, os
+from model.chexpert import CheXpert_model
 from metrics import F1, ACC, AUC
 from torch.optim import Adam
 from torch.nn import BCELoss, BCEWithLogitsLoss
-from torchvision.models import densenet121
-from torch.utils.tensorboard import SummaryWriter
 
-cfg_path = './config/example_PCAM.json'
-train_csv = './CheXpert-v1.0-small/train.csv'
-val_csv = './CheXpert-v1.0-small/valid.csv'
+cfg_path = './config/example.json'
 
 with open(cfg_path) as f:
     cfg = edict(json.load(f))
@@ -23,30 +18,20 @@ with open(cfg_path) as f:
 optimizer = Adam
 loss_func = BCEWithLogitsLoss()
 
-split_output=True
-modify_gp=False
-mix_precision=True
-origin=False
-pretrained=False
-full_classes=True
-conditional_training=False
-lr=1e-4
-
-batch_size = 64
-
-if full_classes:
+if cfg.full_classes:
     data_class = ImageDataset_full
 else:
     data_class = ImageDataset
 
-train_loader = DataLoader(data_class(train_csv, cfg, mode='train'),
+train_loader = DataLoader(data_class(cfg.train_csv, cfg, mode='train'),
                           num_workers=4,drop_last=True,shuffle=True,
-                          batch_size=batch_size)
-val_loader = DataLoader(data_class(val_csv, cfg, mode='dev'),
+                          batch_size=cfg.batch_size)
+val_loader = DataLoader(data_class(cfg.dev_csv, cfg, mode='dev'),
                         num_workers=4,drop_last=False,shuffle=False,
-                        batch_size=batch_size)
+                        batch_size=cfg.batch_size)
 
 metrics_dict = {'acc': ACC(), 'auc':AUC()}
+
 # loader_dict = {'train': train_loader, 'val': val_loader}
 
 # model_names=['resnest', 'efficient', 'dense', 'resnest']
@@ -71,20 +56,13 @@ metrics_dict = {'acc': ACC(), 'auc':AUC()}
 #     'experiment/train_log/ResNeSt101/23h_210121_14class/epoch3_iter400.ckpt'
 #     ]
 
-model_names = ['dense']
-ids = ['121']
-# ckp_paths = ['experiment/DenseNet121_conditional_finetune_2601/checkpoint/epoch5_iter200.ckpt']
-ckp_paths = ['experiment/DenseNet121_conditional_finetune_2601_14/checkpoint/epoch10_iter400.ckpt']
-
 id_leaf = [2,4,5,6,7,8]
 id_obs = [2,5,6,8,10]
 
-for i, model_name in enumerate(model_names):
-    chexpert_model = ChexPert_model(cfg, optimizer, origin, split_output, modify_gp, loss_func,
-                                    model_name, ids[i], lr, metrics_dict, pretrained, full_classes)
-    chexpert_model.load_ckp(ckp_paths[i])
-    metrics = chexpert_model.test(val_loader, mix_precision, conditional_training=conditional_training)
-    if full_classes and not conditional_training:
-        print(model_name+'-'+ids[i]+':\n', metrics['auc'][id_obs], metrics['auc'][id_obs].mean(), '\n', metrics['acc'][id_obs], metrics['acc'][id_obs].mean())
-    else:
-        print(model_name+'-'+ids[i]+':\n', metrics['auc'], metrics['auc'].mean(), '\n', metrics['acc'], metrics['acc'].mean())
+chexpert_model = CheXpert_model(cfg, optimizer, loss_func, metrics_dict)
+chexpert_model.load_ckp(cfg.ckp_path)
+metrics = chexpert_model.test(val_loader)
+if cfg.full_classes and not cfg.conditional_training:
+    print(cfg.model_name+'-'+cfg.id+':\n', metrics['auc'][id_obs], metrics['auc'][id_obs].mean(), '\n', metrics['acc'][id_obs], metrics['acc'][id_obs].mean())
+else:
+    print(cfg.model_name+'-'+cfg.id+':\n', metrics['auc'], metrics['auc'].mean(), '\n', metrics['acc'], metrics['acc'].mean())
